@@ -1,7 +1,46 @@
-export function createSanRows(sanListEl) {
+export function createSanRows(sanListEl, options = {}) {
+  const {
+    checkMapName = async () => ({ ok: false, status: "UNSUPPORTED" }),
+    setLoading = () => {},
+    getCurrentPlatform = async () => "unknown",
+  } = options;
+
+  let shownUnsupportedHint = false;
+
   function setBadge(el, status) {
     el.className = "badge " + status;
     el.textContent = status;
+  }
+
+  async function checkRow(row) {
+    const input = row.querySelector("input");
+    const badge = row.querySelector(".badge");
+    const v = input.value.trim();
+
+    if (!v) {
+      setBadge(badge, "EMPTY");
+      return false;
+    }
+
+    setBadge(badge, "CHECKING");
+
+    try {
+      const res = await checkMapName(v);
+      const status = res?.status || "ERROR";
+      setBadge(badge, status);
+
+      if (status === "UNSUPPORTED" && !shownUnsupportedHint) {
+        shownUnsupportedHint = true;
+        const platform = await getCurrentPlatform();
+        alert("Tính năng Check SHM hiện chỉ hỗ trợ trên Windows.\nMáy hiện tại: " + platform);
+      }
+
+      return status === "FOUND";
+    } catch (err) {
+      console.error(err);
+      setBadge(badge, "ERROR");
+      return false;
+    }
   }
 
   function addSanRow() {
@@ -18,14 +57,10 @@ export function createSanRows(sanListEl) {
     const btn = row.querySelector("button");
     const badge = row.querySelector(".badge");
 
-    // Tạm disable check theo yêu cầu hiện tại
-    btn.onclick = () => {
-      const v = input.value.trim();
-      if (!v) {
-        setBadge(badge, "EMPTY");
-        return;
-      }
-      setBadge(badge, "SKIPPED");
+    btn.onclick = async () => {
+      setLoading(true, "Đang check map name...");
+      await checkRow(row);
+      setLoading(false);
     };
 
     sanListEl.appendChild(row);
@@ -35,18 +70,12 @@ export function createSanRows(sanListEl) {
     return Array.from(document.querySelectorAll(".san-row"));
   }
 
-  function validateRowsNotEmpty(rows) {
+  async function validateRowsFound(rows) {
     for (const row of rows) {
-      const input = row.querySelector("input");
-      const badge = row.querySelector(".badge");
-      const v = input.value.trim();
-
-      if (!v) {
-        setBadge(badge, "EMPTY");
+      const ok = await checkRow(row);
+      if (!ok) {
         return false;
       }
-
-      setBadge(badge, "SKIPPED");
     }
 
     return true;
@@ -60,7 +89,7 @@ export function createSanRows(sanListEl) {
   return {
     addSanRow,
     getRows,
-    validateRowsNotEmpty,
+    validateRowsFound,
     resetRows,
   };
 }

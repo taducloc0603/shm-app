@@ -14,13 +14,18 @@ const btnAddSan = document.getElementById("btnAddSan");
 const formCreate = document.getElementById("formCreate");
 const listConfigsEl = document.getElementById("listConfigs");
 const sanListEl = document.getElementById("sanList");
+let platform = "unknown";
 
 const setLoading = createLoadingOverlay(
   document.getElementById("loadingOverlay"),
   document.getElementById("loadingText")
 );
 
-const sanRows = createSanRows(sanListEl);
+const sanRows = createSanRows(sanListEl, {
+  checkMapName: (mapName) => window.shm.check(mapName),
+  setLoading,
+  getCurrentPlatform: async () => platform,
+});
 const configListView = createConfigListView({
   listEl: listConfigsEl,
   state: appState,
@@ -64,7 +69,7 @@ formCreate.onsubmit = async (e) => {
   setLoading(true, "Đang lưu cấu hình...");
 
   const rows = sanRows.getRows();
-  if (!sanRows.validateRowsNotEmpty(rows)) {
+  if (!(await sanRows.validateRowsFound(rows))) {
     setLoading(false);
     return;
   }
@@ -102,6 +107,11 @@ formCreate.onsubmit = async (e) => {
   setLoading(false);
 };
 
-// Keep for future platform-dependent features
-getPlatform().then(() => {}).catch(() => {});
+getPlatform()
+  .then((v) => {
+    platform = v;
+  })
+  .catch(() => {
+    platform = "unknown";
+  });
 loadConfigs();
