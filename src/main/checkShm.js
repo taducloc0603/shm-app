@@ -36,17 +36,22 @@ async function checkShm(mapName) {
       { windowsHide: true },
       (err, stdout, stderr) => {
         const out = String(stdout || "").trim();
+        const errText = String(stderr || "").trim();
 
         console.log("PS OUT:", out);
-        if (stderr) console.log("PS ERR:", String(stderr).trim());
+        if (errText) console.log("PS ERR:", errText);
 
         if (out === "FOUND") return resolve({ ok: true, status: "FOUND" });
         if (out === "NOT_FOUND") return resolve({ ok: true, status: "NOT_FOUND" });
 
+        const normalizedMessage = out.startsWith("ERROR:")
+          ? out.slice("ERROR:".length).trim()
+          : out;
+
         return resolve({
           ok: false,
           status: "ERROR",
-          message: out || err?.message || "Unknown error",
+          message: normalizedMessage || errText || err?.message || "Unknown error",
         });
       }
     );

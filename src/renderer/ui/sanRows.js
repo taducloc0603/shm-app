@@ -12,6 +12,13 @@ export function createSanRows(sanListEl, options = {}) {
     el.textContent = status;
   }
 
+  function setRowError(row, message = "") {
+    const errorEl = row.querySelector(".san-error");
+    if (!errorEl) return;
+    errorEl.textContent = message;
+    errorEl.style.display = message ? "block" : "none";
+  }
+
   async function checkRow(row) {
     const input = row.querySelector("input");
     const badge = row.querySelector(".badge");
@@ -19,15 +26,25 @@ export function createSanRows(sanListEl, options = {}) {
 
     if (!v) {
       setBadge(badge, "EMPTY");
+      setRowError(row, "Vui lòng nhập map name trước khi check.");
       return false;
     }
 
+    setRowError(row, "");
     setBadge(badge, "CHECKING");
 
     try {
       const res = await checkMapName(v);
       const status = res?.status || "ERROR";
       setBadge(badge, status);
+
+      if (status === "ERROR") {
+        setRowError(row, res?.message || "Có lỗi khi check map name.");
+      } else if (status === "NOT_FOUND") {
+        setRowError(row, "Không tìm thấy map name trong shared memory.");
+      } else {
+        setRowError(row, "");
+      }
 
       if (status === "UNSUPPORTED" && !shownUnsupportedHint) {
         shownUnsupportedHint = true;
@@ -39,6 +56,7 @@ export function createSanRows(sanListEl, options = {}) {
     } catch (err) {
       console.error(err);
       setBadge(badge, "ERROR");
+      setRowError(row, err?.message || "Lỗi không xác định khi check map name.");
       return false;
     }
   }
@@ -51,6 +69,7 @@ export function createSanRows(sanListEl, options = {}) {
       <input placeholder="Map name..." />
       <button type="button">Check</button>
       <span class="badge">-</span>
+      <div class="san-error" style="display:none"></div>
     `;
 
     const input = row.querySelector("input");

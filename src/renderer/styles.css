@@ -328,6 +328,14 @@
       align-items: center;
     }
 
+    .san-error {
+      grid-column: 1 / -1;
+      margin-top: -2px;
+      color: #b91c1c;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
     .san-row button {
       background: #0f172a;
       color: #fff;
