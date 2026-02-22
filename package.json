@@ -1,0 +1,18 @@
+{
+  "name": "shm-desktop-ui",
+  "version": "1.0.0",
+  "main": "src/main/index.js",
+  "scripts": {
+    "dev": "electron .",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.taducloc.shmhub",
+    "productName": "ShmHub",
+    "win": { "target": "nsis" }
+  }
+}

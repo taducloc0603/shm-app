@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <title>Configs</title>
+
+    <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+<!-- Toolbar -->
+<div class="toolbar">
+  <h2>Danh sách cấu hình</h2>
+  <button id="btnOpen">+ Tạo</button>
+</div>
+
+<!-- Danh sách (để trống trước mắt) -->
+<div id="listConfigs"></div>
+
+<div id="loadingOverlay" class="loading-overlay" style="display:none">
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <span id="loadingText">Đang xử lý...</span>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal" id="modal">
+  <div class="modal-content">
+
+    <h3>Tạo cấu hình</h3>
+
+    <form id="formCreate">
+
+      <div class="form-row">
+        <label>Group Name</label>
+        <input name="group_name" required />
+      </div>
+
+      <div class="form-row">
+        <label>Point</label>
+        <input type="number" name="point" step="any" />
+      </div>
+
+      <div class="form-row">
+        <label>Open PTS</label>
+        <input type="number" name="open_pts" />
+      </div>
+
+      <div class="form-row">
+        <label>Confirm Gap PTS</label>
+        <input type="number" name="confirm_gap_pts" />
+      </div>
+
+      <div class="form-row">
+        <label>Hold Confirm MS</label>
+        <input type="number" name="hold_confirm_ms" />
+      </div>
+
+      <hr />
+
+      <h4>Danh sách Sàn</h4>
+
+      <div id="sanList"></div>
+
+      <button type="button" id="btnAddSan">+ Thêm Sàn</button>
+
+      <hr />
+
+      <div style="text-align:right">
+        <button type="button" id="btnClose">Huỷ</button>
+        <button type="submit">Lưu</button>
+      </div>
+
+    </form>
+  </div>
+</div>
+
+<!-- Supabase CDN -->
+<script async src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<script src="./app.js"></script>
+
+</body>
+</html>
