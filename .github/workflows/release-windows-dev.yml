@@ -1,0 +1,48 @@
+name: Build & Release Windows (dev)
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # quan trọng: cho phép tạo Release bằng GITHUB_TOKEN
+
+jobs:
+  build-release-win:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build Windows (no publish)
+        run: npm run build -- --win --publish=never
+
+      # Tạo tag release tự động theo run number để khỏi phải tag tay
+      - name: Set release tag
+        shell: bash
+        run: echo "RELEASE_TAG=dev-${{ github.run_number }}" >> $GITHUB_ENV
+
+      - name: Create GitHub Release (pre-release) and upload files
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Dev build ${{ env.RELEASE_TAG }}
+          prerelease: true
+          files: |
+            dist/*.exe
+            dist/*.msi
+            dist/*.zip
+            dist/*.blockmap
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
