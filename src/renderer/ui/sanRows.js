@@ -40,6 +40,8 @@ export function createSanRows(sanListEl, options = {}) {
 
       if (status === "ERROR") {
         setRowError(row, res?.message || "Có lỗi khi check map name.");
+      } else if (status === "INVALID") {
+        setRowError(row, res?.message || "Map name không hợp lệ.");
       } else if (status === "NOT_FOUND") {
         setRowError(row, "Không tìm thấy map name trong shared memory.");
       } else {

@@ -361,6 +361,7 @@
     .CHECKING { background: #f59e0b; color: #111827; }
     .UNSUPPORTED { background: #7c3aed; color: #fff; }
     .ERROR { background: #334155; color: #fff; }
+    .INVALID { background: #f97316; color: #fff; }
     .EMPTY { background: #94a3b8; color: #fff; }
     .SKIPPED { background: #0ea5e9; color: #fff; }
 
