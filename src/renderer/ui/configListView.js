@@ -2,6 +2,72 @@ import { escapeHtml } from "../utils/escapeHtml.js";
 import { normalizeSans } from "../utils/normalizeSans.js";
 
 export function createConfigListView({ listEl, state, onActiveToggle, onRunStateToggle }) {
+  function formatNumber(value, digits = 5) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "-";
+    return n.toFixed(digits);
+  }
+
+  function formatLatency(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "--";
+    return String(Math.round(n));
+  }
+
+  function formatTimeMsc(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    const d = new Date(n);
+    if (Number.isNaN(d.getTime())) return "-";
+    return d.toLocaleTimeString("vi-VN", {
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }) +
+      "." +
+      String(d.getMilliseconds()).padStart(3, "0");
+  }
+
+  function getCellText(cell, field) {
+    if (!cell || cell.status === "END") return "-";
+
+    if (cell.status === "NOT_FOUND") {
+      if (field === "status") return "NOT_FOUND";
+      return "-";
+    }
+
+    if (cell.status === "ERROR") {
+      if (field === "status") return "ERROR";
+      return "-";
+    }
+
+    switch (field) {
+      case "symbol":
+        return cell.symbol || "-";
+      case "bid":
+        return formatNumber(cell.bid, 5);
+      case "ask":
+        return formatNumber(cell.ask, 5);
+      case "spread":
+        return formatNumber(cell.spread, 5);
+      case "latencyMs":
+        return formatLatency(cell.latencyMs);
+      case "tps":
+        return formatNumber(cell.tps, 1);
+      case "time":
+        return formatTimeMsc(cell.time_msc);
+      case "maxLatencyMs":
+        return formatLatency(cell.maxLatencyMs);
+      case "avgLatencyMs":
+        return formatLatency(cell.avgLatencyMs);
+      case "status":
+        return cell.status || "-";
+      default:
+        return "-";
+    }
+  }
+
   function render(items) {
     if (!items.length) {
       listEl.innerHTML = "";
@@ -16,12 +82,15 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
       const sans = normalizeSans(it.sans);
       const isActive = idx === state.activeConfigIdx;
       const runState = state.runStateByIdx[idx] || "END";
+      const quoteByMap = state.quoteTableByIdx[idx] || {};
       const headerCols = sans.length
         ? sans.map((s) => `<th>${escapeHtml(s)}</th>`).join("")
         : "<th>(chưa có sàn)</th>";
 
-      const emptyCells = sans.length
-        ? sans.map(() => "<td>-</td>").join("")
+      const makeRowCells = (field) => sans.length
+        ? sans
+            .map((mapName) => `<td>${escapeHtml(getCellText(quoteByMap[mapName], field))}</td>`)
+            .join("")
         : "<td>-</td>";
 
       return `
@@ -61,12 +130,44 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
                 </thead>
                 <tbody>
                   <tr>
+                    <td class="row-label">Symbol</td>
+                    ${makeRowCells("symbol")}
+                  </tr>
+                  <tr>
                     <td class="row-label">Bid</td>
-                    ${emptyCells}
+                    ${makeRowCells("bid")}
                   </tr>
                   <tr>
                     <td class="row-label">Ask</td>
-                    ${emptyCells}
+                    ${makeRowCells("ask")}
+                  </tr>
+                  <tr>
+                    <td class="row-label">Spread</td>
+                    ${makeRowCells("spread")}
+                  </tr>
+                  <tr>
+                    <td class="row-label">Latency(ms)</td>
+                    ${makeRowCells("latencyMs")}
+                  </tr>
+                  <tr>
+                    <td class="row-label">TPS</td>
+                    ${makeRowCells("tps")}
+                  </tr>
+                  <tr>
+                    <td class="row-label">Time</td>
+                    ${makeRowCells("time")}
+                  </tr>
+                  <tr>
+                    <td class="row-label">Max Lat(ms)</td>
+                    ${makeRowCells("maxLatencyMs")}
+                  </tr>
+                  <tr>
+                    <td class="row-label">Avg Lat(ms)</td>
+                    ${makeRowCells("avgLatencyMs")}
+                  </tr>
+                  <tr>
+                    <td class="row-label">Status</td>
+                    ${makeRowCells("status")}
                   </tr>
                 </tbody>
               </table>

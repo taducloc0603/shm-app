@@ -4,6 +4,7 @@ import { createSupabaseService } from "./services/supabaseService.js";
 import { createSanRows } from "./ui/sanRows.js";
 import { createConfigListView } from "./ui/configListView.js";
 import { getPlatform } from "./services/platformService.js";
+import { normalizeSans } from "./utils/normalizeSans.js";
 
 const supabaseService = createSupabaseService();
 
@@ -15,6 +16,8 @@ const formCreate = document.getElementById("formCreate");
 const listConfigsEl = document.getElementById("listConfigs");
 const sanListEl = document.getElementById("sanList");
 let platform = "unknown";
+const pollersByIdx = {};
+const POLL_INTERVAL_MS = 300;
 
 const setLoading = createLoadingOverlay(
   document.getElementById("loadingOverlay"),
@@ -34,10 +37,160 @@ const configListView = createConfigListView({
     configListView.render(appState.displayedConfigs);
   },
   onRunStateToggle: (idx, value) => {
-    appState.runStateByIdx[idx] = value;
-    configListView.render(appState.displayedConfigs);
+    if (value === "START") {
+      startQuoteReader(idx);
+      return;
+    }
+
+    stopQuoteReader(idx);
   },
 });
+
+function buildEndCellsForConfig(config) {
+  const mapNames = normalizeSans(config?.sans);
+  const result = {};
+
+  mapNames.forEach((mapName) => {
+    const key = String(mapName || "").trim();
+    if (!key) return;
+    result[key] = { status: "END" };
+  });
+
+  return result;
+}
+
+function stopQuoteReader(idx) {
+  const reader = pollersByIdx[idx];
+  if (reader?.timer) {
+    clearInterval(reader.timer);
+  }
+  delete pollersByIdx[idx];
+
+  appState.runStateByIdx[idx] = "END";
+  appState.quoteTableByIdx[idx] = buildEndCellsForConfig(appState.displayedConfigs[idx]);
+  configListView.render(appState.displayedConfigs);
+}
+
+function stopAllQuoteReaders() {
+  Object.keys(pollersByIdx).forEach((key) => {
+    const reader = pollersByIdx[key];
+    if (reader?.timer) clearInterval(reader.timer);
+    delete pollersByIdx[key];
+  });
+}
+
+function startQuoteReader(idx) {
+  const config = appState.displayedConfigs[idx];
+  const mapNames = normalizeSans(config?.sans)
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+
+  if (!config || !mapNames.length) {
+    appState.runStateByIdx[idx] = "END";
+    appState.quoteTableByIdx[idx] = buildEndCellsForConfig(config);
+    configListView.render(appState.displayedConfigs);
+    return;
+  }
+
+  stopQuoteReader(idx);
+
+  appState.runStateByIdx[idx] = "START";
+  appState.quoteTableByIdx[idx] = buildEndCellsForConfig(config);
+
+  const metricsByMap = {};
+  mapNames.forEach((name) => {
+    metricsByMap[name] = {
+      prevTs: 0,
+      maxLatencyMs: 0,
+      totalLatencyMs: 0,
+      samples: 0,
+    };
+  });
+
+  const tick = async () => {
+    const reader = pollersByIdx[idx];
+    if (!reader || reader.inFlight) return;
+    if (appState.runStateByIdx[idx] !== "START") return;
+
+    reader.inFlight = true;
+
+    const quoteByMap = { ...(appState.quoteTableByIdx[idx] || {}) };
+
+    try {
+      await Promise.all(
+        mapNames.map(async (mapName) => {
+          const startedAt = Date.now();
+
+          try {
+            const res = await window.shm.readQuote(mapName);
+            const latencyMs = Date.now() - startedAt;
+            const stat = metricsByMap[mapName] || {
+              prevTs: 0,
+              maxLatencyMs: 0,
+              totalLatencyMs: 0,
+              samples: 0,
+            };
+
+            stat.samples += 1;
+            stat.totalLatencyMs += latencyMs;
+            stat.maxLatencyMs = Math.max(stat.maxLatencyMs, latencyMs);
+
+            const nowTs = Date.now();
+            const tps = stat.prevTs > 0 ? 1000 / Math.max(1, nowTs - stat.prevTs) : 0;
+            stat.prevTs = nowTs;
+            metricsByMap[mapName] = stat;
+
+            if (res?.status === "FOUND" && res?.data) {
+              quoteByMap[mapName] = {
+                ...res.data,
+                status: "FOUND",
+                latencyMs,
+                tps,
+                maxLatencyMs: stat.maxLatencyMs,
+                avgLatencyMs: stat.totalLatencyMs / stat.samples,
+              };
+              return;
+            }
+
+            if (res?.status === "NOT_FOUND") {
+              quoteByMap[mapName] = { status: "NOT_FOUND" };
+              return;
+            }
+
+            quoteByMap[mapName] = {
+              status: "ERROR",
+              message: res?.message || "Không đọc được dữ liệu map.",
+            };
+          } catch (err) {
+            quoteByMap[mapName] = {
+              status: "ERROR",
+              message: err?.message || "Lỗi không xác định khi đọc dữ liệu.",
+            };
+          }
+        })
+      );
+
+      if (!pollersByIdx[idx] || appState.runStateByIdx[idx] !== "START") {
+        return;
+      }
+
+      appState.quoteTableByIdx[idx] = quoteByMap;
+      configListView.render(appState.displayedConfigs);
+    } finally {
+      if (pollersByIdx[idx]) {
+        pollersByIdx[idx].inFlight = false;
+      }
+    }
+  };
+
+  pollersByIdx[idx] = {
+    timer: setInterval(tick, POLL_INTERVAL_MS),
+    inFlight: false,
+  };
+
+  configListView.render(appState.displayedConfigs);
+  tick();
+}
 
 btnOpen.onclick = () => {
   modal.style.display = "block";
@@ -53,6 +206,10 @@ btnAddSan.onclick = sanRows.addSanRow;
 async function loadConfigs() {
   setLoading(true, "Đang tải danh sách...");
   try {
+    stopAllQuoteReaders();
+    appState.runStateByIdx = {};
+    appState.quoteTableByIdx = {};
+
     const data = await supabaseService.fetchConfigs();
     configListView.render([...data].reverse());
   } catch (err) {
@@ -114,4 +271,9 @@ getPlatform()
   .catch(() => {
     platform = "unknown";
   });
+
+window.addEventListener("beforeunload", () => {
+  stopAllQuoteReaders();
+});
+
 loadConfigs();

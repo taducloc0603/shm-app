@@ -1,32 +1,32 @@
-name: Build Windows (dev)
+# name: Build Windows
 
-on:
-  workflow_dispatch:
-  push:
-    branches: [dev]
+# on:
+#   workflow_dispatch:
+#   push:
+#     branches: [dev]
 
-jobs:
-  build-win:
-    runs-on: windows-latest
+# jobs:
+#   build-win:
+#     runs-on: windows-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+#       - name: Setup Node
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 20
+#           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+#       - name: Install dependencies
+#         run: npm ci
 
-      - name: Build Windows
-        run: npm run build -- --win --publish=never
+#       - name: Build Windows
+#         run: npm run build -- --win --publish=never
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build
-          path: dist/**
+#       - name: Upload artifacts
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: windows-build
+#           path: dist/**

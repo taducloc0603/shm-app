@@ -132,6 +132,122 @@ npm run dev
 npm run build
 ```
 
+## Doưnload exe release
+
+```bash
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Invoke-WebRequest -Uri "LINK_DOWNLOAD_EXE" -OutFile ShmHubSetup.exe
+```
+
+## PowerShell đọc Shared Memory
+
+````
+# ============================
+# CONFIG
+# ============================
+$mapName = "Local\MT5_A"   # đổi nếu cần
+
+# HEADER
+$H_QUOTE_SEQ = 0
+$H_CMD_SEQ   = 4
+$H_ACK_SEQ   = 8
+$H_ACK_CODE  = 12
+
+$HEADER_SIZE = 16
+
+# QUOTE RING
+$QUOTE_RING_OFFSET = 16
+$QUOTE_RING_SIZE   = 64
+$QUOTE_MSG_SIZE    = 48
+
+$Q_TS_OFFSET     = 8
+$Q_BID_OFFSET    = 16
+$Q_ASK_OFFSET    = 24
+$Q_SYMBOL_OFFSET = 32
+
+# ============================
+# OPEN MEMORY
+# ============================
+$mmf  = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting($mapName)
+$view = $mmf.CreateViewAccessor()
+
+function Read-AsciiString($view, $offset, $len) {
+    $bytes = New-Object byte[] $len
+    $view.ReadArray($offset, $bytes, 0, $len) | Out-Null
+    return ([System.Text.Encoding]::ASCII.GetString($bytes)).TrimEnd([char]0)
+}
+
+$lastSeq = -1
+
+while ($true) {
+
+    Clear-Host
+
+    # ============================
+    # HEADER
+    # ============================
+    $quote_seq = $view.ReadUInt32($H_QUOTE_SEQ)
+    $cmd_seq   = $view.ReadUInt32($H_CMD_SEQ)
+    $ack_seq   = $view.ReadUInt32($H_ACK_SEQ)
+    $ack_code  = $view.ReadInt32($H_ACK_CODE)
+
+    Write-Host "================ HEADER ================"
+    Write-Host ("quote_seq : {0}" -f $quote_seq)
+    Write-Host ("cmd_seq   : {0}" -f $cmd_seq)
+    Write-Host ("ack_seq   : {0}" -f $ack_seq)
+    Write-Host ("ack_code  : {0}" -f $ack_code)
+    Write-Host ""
+
+    # ============================
+    # QUOTE INFO
+    # ============================
+    if ($quote_seq -gt 0) {
+        $slot = $quote_seq % $QUOTE_RING_SIZE
+        $base = $QUOTE_RING_OFFSET + ($slot * $QUOTE_MSG_SIZE)
+
+        $time_msc = $view.ReadInt64($base + $Q_TS_OFFSET)
+        $bid      = $view.ReadDouble($base + $Q_BID_OFFSET)
+        $ask      = $view.ReadDouble($base + $Q_ASK_OFFSET)
+        $symbol   = Read-AsciiString $view ($base + $Q_SYMBOL_OFFSET) 16
+
+        Write-Host "================ QUOTE ================="
+        Write-Host ("slot      : {0}" -f $slot)
+        Write-Host ("base addr : 0x{0:X}" -f $base)
+        Write-Host ("symbol    : {0}" -f $symbol)
+        Write-Host ("bid       : {0}" -f $bid)
+        Write-Host ("ask       : {0}" -f $ask)
+        Write-Host ("time_msc  : {0}" -f $time_msc)
+        Write-Host ""
+    }
+    else {
+        Write-Host "No quote yet (quote_seq = 0)"
+        Write-Host ""
+    }
+
+    # ============================
+    # COMMAND STATUS
+    # ============================
+    Write-Host "============== COMMAND STATUS ==========="
+    if ($cmd_seq -eq 0) {
+        Write-Host "No command sent yet."
+    }
+    else {
+        Write-Host ("Last command seq : {0}" -f $cmd_seq)
+
+        if ($ack_seq -eq $cmd_seq) {
+            Write-Host "EA has processed this command."
+            Write-Host ("Result code : {0}" -f $ack_code)
+        }
+        else {
+            Write-Host "EA has NOT processed latest command yet."
+        }
+    }
+
+    Start-Sleep -Milliseconds 500
+}
+````
+
+
 ## Ghi chú bảo mật
 
 - Không commit password/key nhạy cảm vào source code hoặc README.

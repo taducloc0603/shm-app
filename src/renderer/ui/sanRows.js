@@ -69,26 +69,40 @@ export function createSanRows(sanListEl, options = {}) {
 
     row.innerHTML = `
       <input placeholder="Map name..." />
-      <button type="button">Check</button>
+      <button type="button" class="san-check-btn">Check</button>
+      <button type="button" class="san-delete-btn">Xoá</button>
       <span class="badge">-</span>
       <div class="san-error" style="display:none"></div>
     `;
 
     const input = row.querySelector("input");
-    const btn = row.querySelector("button");
+    const btnCheck = row.querySelector(".san-check-btn");
+    const btnDelete = row.querySelector(".san-delete-btn");
     const badge = row.querySelector(".badge");
 
-    btn.onclick = async () => {
+    btnCheck.onclick = async () => {
       setLoading(true, "Đang check map name...");
       await checkRow(row);
       setLoading(false);
+    };
+
+    btnDelete.onclick = () => {
+      const rows = getRows();
+      if (rows.length <= 1) {
+        input.value = "";
+        setBadge(badge, "-");
+        setRowError(row, "");
+        return;
+      }
+
+      row.remove();
     };
 
     sanListEl.appendChild(row);
   }
 
   function getRows() {
-    return Array.from(document.querySelectorAll(".san-row"));
+    return Array.from(sanListEl.querySelectorAll(".san-row"));
   }
 
   async function validateRowsFound(rows) {
