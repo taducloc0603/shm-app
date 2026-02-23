@@ -24,13 +24,75 @@ const globalPoller = {
 };
 const POLL_INTERVAL_MS = 30;
 
-function getEffectiveLatencyMs(row, fallbackMs) {
-  const ts = Number(row?.time_msc);
-  if (!Number.isFinite(ts) || ts <= 0) return fallbackMs;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const EPOCH_MS_THRESHOLD = 1_000_000_000_000;
 
-  const latency = Date.now() - ts;
-  if (!Number.isFinite(latency)) return fallbackMs;
-  return Math.max(0, latency);
+function getDayMsFromNow(nowMs) {
+  const d = new Date(nowMs);
+  return (
+    d.getHours() * 60 * 60 * 1000 +
+    d.getMinutes() * 60 * 1000 +
+    d.getSeconds() * 1000 +
+    d.getMilliseconds()
+  );
+}
+
+function getUtcDayMsFromNow(nowMs) {
+  const d = new Date(nowMs);
+  return (
+    d.getUTCHours() * 60 * 60 * 1000 +
+    d.getUTCMinutes() * 60 * 1000 +
+    d.getUTCSeconds() * 1000 +
+    d.getUTCMilliseconds()
+  );
+}
+
+function calcDayLatency(nowDayMs, tsDayMs) {
+  let diff = nowDayMs - tsDayMs;
+  if (diff < 0) diff += DAY_MS; // day rollover
+  return Number.isFinite(diff) ? Math.max(0, diff) : null;
+}
+
+function calcLatencyFromTimeMsc(ts, nowMs, expectedMs = null) {
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+
+  // Unix epoch milliseconds (e.g. 1700000000000)
+  if (ts >= EPOCH_MS_THRESHOLD) {
+    const diff = nowMs - ts;
+    return Number.isFinite(diff) ? Math.max(0, diff) : null;
+  }
+
+  // Milliseconds in day (0..86399999)
+  if (ts < DAY_MS) {
+    const localDiff = calcDayLatency(getDayMsFromNow(nowMs), ts);
+    const utcDiff = calcDayLatency(getUtcDayMsFromNow(nowMs), ts);
+
+    const candidates = [localDiff, utcDiff].filter((v) => Number.isFinite(v));
+    if (!candidates.length) return null;
+
+    const expected = Number(expectedMs);
+    if (Number.isFinite(expected) && expected >= 0) {
+      return candidates.reduce((best, cur) =>
+        Math.abs(cur - expected) < Math.abs(best - expected) ? cur : best
+      );
+    }
+
+    // Không có baseline thì chọn giá trị nhỏ hơn để tránh lệch timezone lớn.
+    return Math.min(...candidates);
+  }
+
+  return null;
+}
+
+function getEffectiveLatencyMs(row, fallbackMs) {
+  const nowMs = Date.now();
+  const ts = Number(row?.time_msc);
+  const parsed = calcLatencyFromTimeMsc(ts, nowMs, fallbackMs);
+  if (Number.isFinite(parsed)) return parsed;
+
+  const fallback = Number(fallbackMs);
+  if (!Number.isFinite(fallback)) return 0;
+  return Math.max(0, fallback);
 }
 
 const setLoading = createLoadingOverlay(
@@ -143,18 +205,18 @@ function ensureGlobalPollerRunning() {
             prevTs: 0,
             maxLatencyMs: 0,
             totalLatencyMs: 0,
-            samples: 0,
+            latencySamples: 0,
           };
 
           const row = byMapName[mapName];
 
-          stat.samples += 1;
           const tps = stat.prevTs > 0 ? 1000 / Math.max(1, nowTs - stat.prevTs) : 0;
           stat.prevTs = nowTs;
 
           if (row?.status === "FOUND") {
             const effectiveLatencyMs = getEffectiveLatencyMs(row, fallbackLatencyMs);
             stat.totalLatencyMs += effectiveLatencyMs;
+            stat.latencySamples = (stat.latencySamples || 0) + 1;
             stat.maxLatencyMs = Math.max(stat.maxLatencyMs, effectiveLatencyMs);
 
             quoteByMap[mapName] = {
@@ -166,7 +228,7 @@ function ensureGlobalPollerRunning() {
               latencyMs: effectiveLatencyMs,
               tps,
               maxLatencyMs: stat.maxLatencyMs,
-              avgLatencyMs: stat.totalLatencyMs / stat.samples,
+              avgLatencyMs: stat.latencySamples > 0 ? stat.totalLatencyMs / stat.latencySamples : 0,
             };
           } else if (row?.status === "NOT_FOUND") {
             quoteByMap[mapName] = { status: "NOT_FOUND" };
@@ -239,7 +301,7 @@ function startQuoteReader(idx) {
       prevTs: 0,
       maxLatencyMs: 0,
       totalLatencyMs: 0,
-      samples: 0,
+      latencySamples: 0,
     };
   });
 
