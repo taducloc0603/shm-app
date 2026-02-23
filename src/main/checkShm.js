@@ -1,4 +1,5 @@
 const { execFile } = require("child_process");
+const path = require("path");
 
 const SHM_LAYOUT = {
   H_QUOTE_SEQ: 0,
@@ -14,6 +15,44 @@ const SHM_LAYOUT = {
   Q_SYMBOL_OFFSET: 32,
   Q_SYMBOL_LEN: 16,
 };
+
+let nativeShmReader = null;
+let nativeLoadError = null;
+
+function loadNativeReader() {
+  if (nativeShmReader || nativeLoadError) return nativeShmReader;
+
+  try {
+    const baseCandidates = [
+      path.join(__dirname, "../../native/shm_reader/build/Release/shm_reader.node"),
+      path.join(__dirname, "../../native/shm_reader/build/Debug/shm_reader.node"),
+    ];
+
+    const unpackedCandidates = baseCandidates
+      .filter((p) => p.includes("app.asar"))
+      .map((p) => p.replace("app.asar", "app.asar.unpacked"));
+
+    const candidatePaths = [...baseCandidates, ...unpackedCandidates];
+
+    for (const addonPath of candidatePaths) {
+      try {
+        // eslint-disable-next-line global-require, import/no-dynamic-require
+        nativeShmReader = require(addonPath);
+        break;
+      } catch (_err) {
+        // try next candidate
+      }
+    }
+
+    if (!nativeShmReader) {
+      throw new Error("Không load được native addon shm_reader (.node).");
+    }
+  } catch (err) {
+    nativeLoadError = err;
+  }
+
+  return nativeShmReader;
+}
 
 function runPowerShell(script, timeout = 5000) {
   return new Promise((resolve) => {
@@ -58,12 +97,10 @@ async function checkShm(mapName) {
     return {
       ok: false,
       status: "UNSUPPORTED",
-      message: "Hiện check_shm bằng PowerShell chỉ chạy trên Windows (powershell.exe).",
+      message: "Hiện check_shm chỉ hỗ trợ Windows.",
     };
   }
 
-  // PowerShell single-quoted string không cần escape dấu backslash.
-  // Chỉ cần escape dấu nháy đơn để giữ nguyên map name (vd: Global\MyMap).
   const escaped = name.replace(/'/g, "''");
 
   const psCommand =
@@ -83,9 +120,6 @@ async function checkShm(mapName) {
     .split(/\r?\n/)
     .map((s) => s.trim())
     .find((line) => line.startsWith("__SHM_STATUS__:"));
-
-  console.log("PS OUT:", out);
-  if (errText) console.log("PS ERR:", errText);
 
   if (statusLine === "__SHM_STATUS__:FOUND") {
     return { ok: true, status: "FOUND" };
@@ -110,65 +144,21 @@ async function checkShm(mapName) {
   };
 }
 
-async function readShmQuote(mapName) {
-  const res = await readShmQuotes([mapName]);
-  if (!res?.ok) return res;
-
-  const row = Array.isArray(res.data) ? res.data[0] : null;
-  if (!row) {
-    return {
-      ok: false,
-      status: "ERROR",
-      message: "Không nhận được dữ liệu quote.",
-    };
-  }
-
-  if (row.status === "FOUND") {
-    return {
-      ok: true,
-      status: "FOUND",
-      data: {
-        quote_seq: row.quote_seq,
-        cmd_seq: row.cmd_seq,
-        ack_seq: row.ack_seq,
-        ack_code: row.ack_code,
-        slot: row.slot,
-        base_addr: row.base_addr,
-        symbol: cleanSymbol(row.symbol),
-        bid: row.bid,
-        ask: row.ask,
-        spread: row.spread,
-        time_msc: row.time_msc,
-      },
-    };
-  }
-
-  if (row.status === "NOT_FOUND") {
-    return { ok: true, status: "NOT_FOUND" };
-  }
-
-  return {
-    ok: false,
-    status: "ERROR",
-    message: row?.message || "Không đọc được dữ liệu map.",
-  };
+function normalizeRows(rows) {
+  return (Array.isArray(rows) ? rows : [rows]).map((row) =>
+    row?.status === "FOUND"
+      ? {
+          ...row,
+          symbol: cleanSymbol(row.symbol),
+          spread: Number.isFinite(Number(row.spread))
+            ? Number(row.spread)
+            : Number(row.ask) - Number(row.bid),
+        }
+      : row
+  );
 }
 
-async function readShmQuotes(mapNames) {
-  const names = Array.isArray(mapNames)
-    ? mapNames.map((v) => String(v || "").trim()).filter(Boolean)
-    : [];
-
-  if (!names.length) return { ok: false, status: "EMPTY" };
-
-  if (process.platform !== "win32") {
-    return {
-      ok: false,
-      status: "UNSUPPORTED",
-      message: "Đọc shared memory realtime hiện chỉ hỗ trợ Windows.",
-    };
-  }
-
+async function readShmQuotesViaPowerShell(names) {
   const namesJsonEscaped = JSON.stringify(names).replace(/'/g, "''");
   const c = SHM_LAYOUT;
   const psCommand =
@@ -230,18 +220,10 @@ async function readShmQuotes(mapNames) {
 
   try {
     const parsed = JSON.parse(out);
-    const rows = (Array.isArray(parsed) ? parsed : [parsed]).map((row) =>
-      row?.status === "FOUND"
-        ? {
-            ...row,
-            symbol: cleanSymbol(row.symbol),
-          }
-        : row
-    );
     return {
       ok: true,
       status: "FOUND",
-      data: rows,
+      data: normalizeRows(parsed),
     };
   } catch (parseErr) {
     return {
@@ -251,6 +233,96 @@ async function readShmQuotes(mapNames) {
       raw: out,
     };
   }
+}
+
+async function readShmQuote(mapName) {
+  const res = await readShmQuotes([mapName]);
+  if (!res?.ok) return res;
+
+  const row = Array.isArray(res.data) ? res.data[0] : null;
+  if (!row) {
+    return {
+      ok: false,
+      status: "ERROR",
+      message: "Không nhận được dữ liệu quote.",
+    };
+  }
+
+  if (row.status === "FOUND") {
+    return {
+      ok: true,
+      status: "FOUND",
+      data: {
+        quote_seq: row.quote_seq,
+        cmd_seq: row.cmd_seq,
+        ack_seq: row.ack_seq,
+        ack_code: row.ack_code,
+        slot: row.slot,
+        base_addr: row.base_addr,
+        symbol: cleanSymbol(row.symbol),
+        bid: row.bid,
+        ask: row.ask,
+        spread: row.spread,
+        time_msc: row.time_msc,
+      },
+    };
+  }
+
+  if (row.status === "NOT_FOUND") {
+    return { ok: true, status: "NOT_FOUND" };
+  }
+
+  return {
+    ok: false,
+    status: "ERROR",
+    message: row?.message || "Không đọc được dữ liệu map.",
+  };
+}
+
+async function readShmQuotes(mapNames) {
+  const names = Array.isArray(mapNames)
+    ? mapNames.map((v) => String(v || "").trim()).filter(Boolean)
+    : [];
+
+  if (!names.length) return { ok: false, status: "EMPTY" };
+
+  if (process.platform !== "win32") {
+    return {
+      ok: false,
+      status: "UNSUPPORTED",
+      message: "Đọc shared memory realtime hiện chỉ hỗ trợ Windows.",
+    };
+  }
+
+  const nativeReader = loadNativeReader();
+  if (nativeReader?.readBatch) {
+    try {
+      const rows = nativeReader.readBatch(names);
+      return {
+        ok: true,
+        status: "FOUND",
+        data: normalizeRows(rows),
+        source: "native",
+      };
+    } catch (err) {
+      const fallback = await readShmQuotesViaPowerShell(names);
+      if (fallback?.ok) {
+        return {
+          ...fallback,
+          source: "powershell_fallback",
+          nativeError: `Native reader error: ${err?.message || "Unknown"}`,
+        };
+      }
+
+      return {
+        ok: false,
+        status: "ERROR",
+        message: `Native reader error: ${err?.message || "Unknown"}`,
+      };
+    }
+  }
+
+  return readShmQuotesViaPowerShell(names);
 }
 
 module.exports = { checkShm, readShmQuote, readShmQuotes };

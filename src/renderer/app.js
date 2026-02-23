@@ -16,8 +16,22 @@ const formCreate = document.getElementById("formCreate");
 const listConfigsEl = document.getElementById("listConfigs");
 const sanListEl = document.getElementById("sanList");
 let platform = "unknown";
-const pollersByIdx = {};
-const POLL_INTERVAL_MS = 180;
+const activeReadersByIdx = {};
+const globalPoller = {
+  timer: null,
+  inFlight: false,
+  running: false,
+};
+const POLL_INTERVAL_MS = 30;
+
+function getEffectiveLatencyMs(row, fallbackMs) {
+  const ts = Number(row?.time_msc);
+  if (!Number.isFinite(ts) || ts <= 0) return fallbackMs;
+
+  const latency = Date.now() - ts;
+  if (!Number.isFinite(latency)) return fallbackMs;
+  return Math.max(0, latency);
+}
 
 const setLoading = createLoadingOverlay(
   document.getElementById("loadingOverlay"),
@@ -59,24 +73,146 @@ function buildEndCellsForConfig(config) {
   return result;
 }
 
-function stopQuoteReader(idx) {
-  const reader = pollersByIdx[idx];
-  if (reader?.timer) {
-    clearInterval(reader.timer);
+function hasActiveReaders() {
+  return Object.keys(activeReadersByIdx).length > 0;
+}
+
+function stopGlobalPollerIfIdle() {
+  if (hasActiveReaders()) return;
+  if (globalPoller.timer) {
+    clearTimeout(globalPoller.timer);
+    globalPoller.timer = null;
   }
-  delete pollersByIdx[idx];
+  globalPoller.inFlight = false;
+  globalPoller.running = false;
+}
+
+function ensureGlobalPollerRunning() {
+  if (globalPoller.running) return;
+  globalPoller.running = true;
+
+  const scheduleNext = (delayMs = POLL_INTERVAL_MS) => {
+    if (!globalPoller.running) return;
+    if (globalPoller.timer) {
+      clearTimeout(globalPoller.timer);
+    }
+    globalPoller.timer = setTimeout(tick, Math.max(0, delayMs));
+  };
+
+  const tick = async () => {
+    globalPoller.timer = null;
+
+    if (globalPoller.inFlight) return;
+
+    const activeEntries = Object.entries(activeReadersByIdx)
+      .map(([idx, reader]) => [Number(idx), reader])
+      .filter(([idx, reader]) =>
+        appState.runStateByIdx[idx] === "START" && Array.isArray(reader?.mapNames) && reader.mapNames.length
+      );
+
+    if (!activeEntries.length) {
+      stopGlobalPollerIfIdle();
+      return;
+    }
+
+    const unionMapNames = Array.from(
+      new Set(activeEntries.flatMap(([, reader]) => reader.mapNames))
+    );
+
+    if (!unionMapNames.length) {
+      scheduleNext();
+      return;
+    }
+
+    globalPoller.inFlight = true;
+
+    try {
+      const startedAt = Date.now();
+      const batchRes = await window.shm.readQuotes(unionMapNames);
+      const fallbackLatencyMs = Date.now() - startedAt;
+
+      const rows = Array.isArray(batchRes?.data) ? batchRes.data : [];
+      const byMapName = Object.fromEntries(rows.map((r) => [String(r?.map_name || "").trim(), r]));
+      const nowTs = Date.now();
+
+      activeEntries.forEach(([idx, reader]) => {
+        const quoteByMap = { ...(appState.quoteTableByIdx[idx] || {}) };
+
+        reader.mapNames.forEach((mapName) => {
+          const stat = reader.metricsByMap[mapName] || {
+            prevTs: 0,
+            maxLatencyMs: 0,
+            totalLatencyMs: 0,
+            samples: 0,
+          };
+
+          const row = byMapName[mapName];
+
+          stat.samples += 1;
+          const tps = stat.prevTs > 0 ? 1000 / Math.max(1, nowTs - stat.prevTs) : 0;
+          stat.prevTs = nowTs;
+
+          if (row?.status === "FOUND") {
+            const effectiveLatencyMs = getEffectiveLatencyMs(row, fallbackLatencyMs);
+            stat.totalLatencyMs += effectiveLatencyMs;
+            stat.maxLatencyMs = Math.max(stat.maxLatencyMs, effectiveLatencyMs);
+
+            quoteByMap[mapName] = {
+              ...row,
+              spread: Number.isFinite(Number(row.spread))
+                ? Number(row.spread)
+                : Number(row.ask) - Number(row.bid),
+              status: "FOUND",
+              latencyMs: effectiveLatencyMs,
+              tps,
+              maxLatencyMs: stat.maxLatencyMs,
+              avgLatencyMs: stat.totalLatencyMs / stat.samples,
+            };
+          } else if (row?.status === "NOT_FOUND") {
+            quoteByMap[mapName] = { status: "NOT_FOUND" };
+          } else if (!batchRes?.ok) {
+            quoteByMap[mapName] = {
+              status: "ERROR",
+              message: batchRes?.message || "Không đọc được dữ liệu map.",
+            };
+          } else {
+            quoteByMap[mapName] = {
+              status: row?.status || "ERROR",
+              message: row?.message || "Không đọc được dữ liệu map.",
+            };
+          }
+
+          reader.metricsByMap[mapName] = stat;
+        });
+
+        appState.quoteTableByIdx[idx] = quoteByMap;
+      });
+
+      configListView.render(appState.displayedConfigs);
+    } finally {
+      globalPoller.inFlight = false;
+      scheduleNext();
+    }
+  };
+
+  scheduleNext(0);
+}
+
+function stopQuoteReader(idx) {
+  delete activeReadersByIdx[idx];
 
   appState.runStateByIdx[idx] = "END";
   appState.quoteTableByIdx[idx] = buildEndCellsForConfig(appState.displayedConfigs[idx]);
   configListView.render(appState.displayedConfigs);
+
+  stopGlobalPollerIfIdle();
 }
 
 function stopAllQuoteReaders() {
-  Object.keys(pollersByIdx).forEach((key) => {
-    const reader = pollersByIdx[key];
-    if (reader?.timer) clearInterval(reader.timer);
-    delete pollersByIdx[key];
+  Object.keys(activeReadersByIdx).forEach((key) => {
+    delete activeReadersByIdx[key];
   });
+  stopGlobalPollerIfIdle();
 }
 
 function startQuoteReader(idx) {
@@ -107,96 +243,13 @@ function startQuoteReader(idx) {
     };
   });
 
-  const tick = async () => {
-    const reader = pollersByIdx[idx];
-    if (!reader || reader.inFlight) return;
-    if (appState.runStateByIdx[idx] !== "START") return;
-
-    reader.inFlight = true;
-
-    const quoteByMap = { ...(appState.quoteTableByIdx[idx] || {}) };
-
-    try {
-      const startedAt = Date.now();
-      const batchRes = await window.shm.readQuotes(mapNames);
-      const latencyMs = Date.now() - startedAt;
-
-      const rows = Array.isArray(batchRes?.data) ? batchRes.data : [];
-      const byMapName = Object.fromEntries(rows.map((r) => [String(r?.map_name || "").trim(), r]));
-
-      mapNames.forEach((mapName) => {
-        const stat = metricsByMap[mapName] || {
-          prevTs: 0,
-          maxLatencyMs: 0,
-          totalLatencyMs: 0,
-          samples: 0,
-        };
-
-        stat.samples += 1;
-        stat.totalLatencyMs += latencyMs;
-        stat.maxLatencyMs = Math.max(stat.maxLatencyMs, latencyMs);
-
-        const nowTs = Date.now();
-        const tps = stat.prevTs > 0 ? 1000 / Math.max(1, nowTs - stat.prevTs) : 0;
-        stat.prevTs = nowTs;
-        metricsByMap[mapName] = stat;
-
-        const row = byMapName[mapName];
-
-        if (row?.status === "FOUND") {
-          quoteByMap[mapName] = {
-            ...row,
-            spread: Number.isFinite(Number(row.spread))
-              ? Number(row.spread)
-              : Number(row.ask) - Number(row.bid),
-            status: "FOUND",
-            latencyMs,
-            tps,
-            maxLatencyMs: stat.maxLatencyMs,
-            avgLatencyMs: stat.totalLatencyMs / stat.samples,
-          };
-          return;
-        }
-
-        if (row?.status === "NOT_FOUND") {
-          quoteByMap[mapName] = { status: "NOT_FOUND" };
-          return;
-        }
-
-        if (!batchRes?.ok) {
-          quoteByMap[mapName] = {
-            status: "ERROR",
-            message: batchRes?.message || "Không đọc được dữ liệu map.",
-          };
-          return;
-        }
-
-        quoteByMap[mapName] = {
-          status: row?.status || "ERROR",
-          message: row?.message || "Không đọc được dữ liệu map.",
-        };
-      });
-
-      if (!pollersByIdx[idx] || appState.runStateByIdx[idx] !== "START") {
-        return;
-      }
-
-      appState.quoteTableByIdx[idx] = quoteByMap;
-      configListView.render(appState.displayedConfigs);
-    } finally {
-      if (pollersByIdx[idx]) {
-        pollersByIdx[idx].inFlight = false;
-      }
-    }
-  };
-
-  pollersByIdx[idx] = {
-    timer: setInterval(tick, POLL_INTERVAL_MS),
-    inFlight: false,
+  activeReadersByIdx[idx] = {
+    mapNames,
+    metricsByMap,
   };
 
   configListView.render(appState.displayedConfigs);
-  tick();
+  ensureGlobalPollerRunning();
 }
 
 btnOpen.onclick = () => {

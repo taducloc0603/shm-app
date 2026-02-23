@@ -4,15 +4,31 @@
   "main": "src/main/index.js",
   "scripts": {
     "dev": "electron .",
-    "build": "electron-builder"
+    "build": "electron-builder",
+    "rebuild-native": "node-gyp rebuild --directory native/shm_reader"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.3.1"
   },
   "devDependencies": {
     "electron": "^31.0.0",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "node-gyp": "^11.1.0"
   },
   "build": {
     "appId": "com.taducloc.shmhub",
     "productName": "ShmHub",
+    "asarUnpack": [
+      "native/shm_reader/build/**/*.node"
+    ],
+    "files": [
+      "src/**/*",
+      "index.html",
+      "main.js",
+      "preload.js",
+      "native/shm_reader/build/**/*",
+      "package.json"
+    ],
     "win": { "target": "nsis" }
   }
 }

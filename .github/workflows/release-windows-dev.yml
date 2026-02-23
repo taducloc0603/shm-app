@@ -23,7 +23,20 @@ jobs:
           cache: npm
 
       - name: Install deps
-        run: npm ci
+        run: npm install
+
+      - name: Rebuild native addon (shm_reader)
+        run: npm run rebuild-native
+
+      - name: Verify native addon output
+        shell: powershell
+        run: |
+          if (Test-Path "native/shm_reader/build/Release/shm_reader.node") {
+            Write-Host "Found native addon: native/shm_reader/build/Release/shm_reader.node"
+          } else {
+            Write-Error "Missing native addon output (.node)."
+            exit 1
+          }
 
       - name: Build Windows (no publish)
         run: npm run build -- --win --publish=never
