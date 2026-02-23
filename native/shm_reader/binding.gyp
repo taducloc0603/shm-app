@@ -9,7 +9,10 @@
       "dependencies": [
         "<!(node -p \"require('node-addon-api').gyp\")"
       ],
-      "defines": ["NAPI_VERSION=8"]
+      "defines": [
+        "NAPI_VERSION=8",
+        "NODE_ADDON_API_DISABLE_CPP_EXCEPTIONS"
+      ]
     }
   ]
 }
