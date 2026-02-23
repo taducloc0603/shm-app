@@ -1,5 +1,20 @@
 const { execFile } = require("child_process");
 
+const SHM_LAYOUT = {
+  H_QUOTE_SEQ: 0,
+  H_CMD_SEQ: 4,
+  H_ACK_SEQ: 8,
+  H_ACK_CODE: 12,
+  QUOTE_RING_OFFSET: 16,
+  QUOTE_RING_SIZE: 64,
+  QUOTE_MSG_SIZE: 48,
+  Q_TS_OFFSET: 8,
+  Q_BID_OFFSET: 16,
+  Q_ASK_OFFSET: 24,
+  Q_SYMBOL_OFFSET: 32,
+  Q_SYMBOL_LEN: 16,
+};
+
 function runPowerShell(script, timeout = 5000) {
   return new Promise((resolve) => {
     execFile(
@@ -15,6 +30,12 @@ function runPowerShell(script, timeout = 5000) {
       }
     );
   });
+}
+
+function cleanSymbol(symbol) {
+  return String(symbol || "")
+    .replace(/[^\x20-\x7E]/g, "")
+    .trim();
 }
 
 /**
@@ -90,8 +111,55 @@ async function checkShm(mapName) {
 }
 
 async function readShmQuote(mapName) {
-  const name = String(mapName || "").trim();
-  if (!name) return { ok: false, status: "EMPTY" };
+  const res = await readShmQuotes([mapName]);
+  if (!res?.ok) return res;
+
+  const row = Array.isArray(res.data) ? res.data[0] : null;
+  if (!row) {
+    return {
+      ok: false,
+      status: "ERROR",
+      message: "Không nhận được dữ liệu quote.",
+    };
+  }
+
+  if (row.status === "FOUND") {
+    return {
+      ok: true,
+      status: "FOUND",
+      data: {
+        quote_seq: row.quote_seq,
+        cmd_seq: row.cmd_seq,
+        ack_seq: row.ack_seq,
+        ack_code: row.ack_code,
+        slot: row.slot,
+        base_addr: row.base_addr,
+        symbol: cleanSymbol(row.symbol),
+        bid: row.bid,
+        ask: row.ask,
+        spread: row.spread,
+        time_msc: row.time_msc,
+      },
+    };
+  }
+
+  if (row.status === "NOT_FOUND") {
+    return { ok: true, status: "NOT_FOUND" };
+  }
+
+  return {
+    ok: false,
+    status: "ERROR",
+    message: row?.message || "Không đọc được dữ liệu map.",
+  };
+}
+
+async function readShmQuotes(mapNames) {
+  const names = Array.isArray(mapNames)
+    ? mapNames.map((v) => String(v || "").trim()).filter(Boolean)
+    : [];
+
+  if (!names.length) return { ok: false, status: "EMPTY" };
 
   if (process.platform !== "win32") {
     return {
@@ -101,48 +169,54 @@ async function readShmQuote(mapName) {
     };
   }
 
-  const escaped = name.replace(/'/g, "''");
+  const namesJsonEscaped = JSON.stringify(names).replace(/'/g, "''");
+  const c = SHM_LAYOUT;
   const psCommand =
     "$ErrorActionPreference = 'Stop'; " +
-    "$maxRetry = 3; " +
-    "$result = $null; " +
-    "for ($i = 0; $i -lt $maxRetry; $i++) { " +
-    "$mmf = $null; $view = $null; $br = $null; " +
+    `$quoteSeqOffset=${c.H_QUOTE_SEQ}; $cmdSeqOffset=${c.H_CMD_SEQ}; $ackSeqOffset=${c.H_ACK_SEQ}; $ackCodeOffset=${c.H_ACK_CODE}; ` +
+    `$quoteRingOffset=${c.QUOTE_RING_OFFSET}; $quoteRingSize=${c.QUOTE_RING_SIZE}; $quoteMsgSize=${c.QUOTE_MSG_SIZE}; ` +
+    `$qTsOffset=${c.Q_TS_OFFSET}; $qBidOffset=${c.Q_BID_OFFSET}; $qAskOffset=${c.Q_ASK_OFFSET}; $qSymbolOffset=${c.Q_SYMBOL_OFFSET}; $qSymbolLen=${c.Q_SYMBOL_LEN}; ` +
+    "$mapNames = ConvertFrom-Json '" + namesJsonEscaped + "'; " +
+    "$results = New-Object System.Collections.Generic.List[Object]; " +
+    "foreach ($mapName in $mapNames) { " +
+    "$mmf = $null; $view = $null; $item = $null; " +
     "try { " +
-    "$mmf = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting('" + escaped + "'); " +
-    "$view = $mmf.CreateViewStream(); " +
-    "$br = New-Object System.IO.BinaryReader($view); " +
-    "$quote_seq_1 = $br.ReadUInt32(); " +
-    "$cmd_seq = $br.ReadUInt32(); " +
-    "$ack_seq = $br.ReadUInt32(); " +
-    "$ack_code = $br.ReadUInt32(); " +
-    "$slot = $br.ReadUInt32(); " +
-    "$base_addr = $br.ReadUInt64(); " +
-    "$symbol_bytes = $br.ReadBytes(32); " +
-    "$symbol = [System.Text.Encoding]::ASCII.GetString($symbol_bytes).Trim([char]0); " +
-    "$bid = $br.ReadDouble(); " +
-    "$ask = $br.ReadDouble(); " +
-    "$time_msc = $br.ReadInt64(); " +
-    "$view.Position = 0; " +
-    "$quote_seq_2 = $br.ReadUInt32(); " +
+    "$mmf = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting($mapName); " +
+    "$view = $mmf.CreateViewAccessor(); " +
+    "$stable = $false; " +
+    "for ($i = 0; $i -lt 4; $i++) { " +
+    "$quote_seq_1 = $view.ReadUInt32($quoteSeqOffset); " +
+    "$cmd_seq = $view.ReadUInt32($cmdSeqOffset); " +
+    "$ack_seq = $view.ReadUInt32($ackSeqOffset); " +
+    "$ack_code = $view.ReadInt32($ackCodeOffset); " +
+    "$slot = [int]($quote_seq_1 % $quoteRingSize); " +
+    "$base = $quoteRingOffset + ($slot * $quoteMsgSize); " +
+    "$time_msc = $view.ReadInt64($base + $qTsOffset); " +
+    "$bid = $view.ReadDouble($base + $qBidOffset); " +
+    "$ask = $view.ReadDouble($base + $qAskOffset); " +
+    "$symbolBytes = New-Object byte[] $qSymbolLen; " +
+    "$null = $view.ReadArray($base + $qSymbolOffset, $symbolBytes, 0, $qSymbolLen); " +
+    "$symbol = [System.Text.Encoding]::ASCII.GetString($symbolBytes).Trim([char]0); " +
+    "$quote_seq_2 = $view.ReadUInt32($quoteSeqOffset); " +
     "if ($quote_seq_1 -eq $quote_seq_2) { " +
-    "$result = @{ status='FOUND'; quote_seq=$quote_seq_2; cmd_seq=$cmd_seq; ack_seq=$ack_seq; ack_code=$ack_code; slot=$slot; base_addr=('0x' + $base_addr.ToString('X')); symbol=$symbol; bid=$bid; ask=$ask; spread=($ask - $bid); time_msc=$time_msc; retries=$i }; " +
+    "$stable = $true; " +
+    "$item = [PSCustomObject]@{ map_name=$mapName; status='FOUND'; quote_seq=$quote_seq_2; cmd_seq=$cmd_seq; ack_seq=$ack_seq; ack_code=$ack_code; slot=$slot; base_addr=('0x' + $base.ToString('X')); symbol=$symbol; bid=$bid; ask=$ask; spread=($ask - $bid); time_msc=$time_msc; retries=$i }; " +
     "break; " +
     "} " +
-    "Start-Sleep -Milliseconds 2; " +
+    "Start-Sleep -Milliseconds 1; " +
+    "} " +
+    "if (-not $stable) { $item = [PSCustomObject]@{ map_name=$mapName; status='ERROR'; message='Không lấy được snapshot ổn định sau nhiều lần thử.' } } " +
     "} catch [System.IO.FileNotFoundException] { " +
-    "$result = @{ status='NOT_FOUND' }; " +
-    "break; " +
+    "$item = [PSCustomObject]@{ map_name=$mapName; status='NOT_FOUND' }; " +
     "} catch { " +
-    "$result = @{ status='ERROR'; message=$_.Exception.Message }; " +
+    "$item = [PSCustomObject]@{ map_name=$mapName; status='ERROR'; message=$_.Exception.Message }; " +
     "} finally { " +
-    "if ($br -ne $null) { $br.Close() }; " +
-    "if ($view -ne $null) { $view.Close() }; " +
+    "if ($view -ne $null) { $view.Dispose() }; " +
     "if ($mmf -ne $null) { $mmf.Dispose() }; " +
+    "if ($item -ne $null) { $results.Add($item) } " +
     "} " +
     "} " +
-    "if ($result -eq $null) { $result = @{ status='ERROR'; message='Không lấy được snapshot ổn định sau nhiều lần thử.' } }; " +
-    "$result | ConvertTo-Json -Compress;";
+    "$results | ConvertTo-Json -Compress;";
 
   const { err, out, errText } = await runPowerShell(psCommand, 3000);
 
@@ -156,36 +230,18 @@ async function readShmQuote(mapName) {
 
   try {
     const parsed = JSON.parse(out);
-    const status = parsed?.status || "ERROR";
-
-    if (status === "FOUND") {
-      return {
-        ok: true,
-        status: "FOUND",
-        data: {
-          quote_seq: parsed.quote_seq,
-          cmd_seq: parsed.cmd_seq,
-          ack_seq: parsed.ack_seq,
-          ack_code: parsed.ack_code,
-          slot: parsed.slot,
-          base_addr: parsed.base_addr,
-          symbol: parsed.symbol,
-          bid: parsed.bid,
-          ask: parsed.ask,
-          spread: parsed.spread,
-          time_msc: parsed.time_msc,
-        },
-      };
-    }
-
-    if (status === "NOT_FOUND") {
-      return { ok: true, status: "NOT_FOUND" };
-    }
-
+    const rows = (Array.isArray(parsed) ? parsed : [parsed]).map((row) =>
+      row?.status === "FOUND"
+        ? {
+            ...row,
+            symbol: cleanSymbol(row.symbol),
+          }
+        : row
+    );
     return {
-      ok: false,
-      status: "ERROR",
-      message: parsed?.message || errText || err?.message || "Không đọc được dữ liệu map.",
+      ok: true,
+      status: "FOUND",
+      data: rows,
     };
   } catch (parseErr) {
     return {
@@ -197,4 +253,4 @@ async function readShmQuote(mapName) {
   }
 }
 
-module.exports = { checkShm, readShmQuote };
+module.exports = { checkShm, readShmQuote, readShmQuotes };

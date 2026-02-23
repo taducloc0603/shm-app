@@ -17,7 +17,7 @@ const listConfigsEl = document.getElementById("listConfigs");
 const sanListEl = document.getElementById("sanList");
 let platform = "unknown";
 const pollersByIdx = {};
-const POLL_INTERVAL_MS = 300;
+const POLL_INTERVAL_MS = 180;
 
 const setLoading = createLoadingOverlay(
   document.getElementById("loadingOverlay"),
@@ -117,58 +117,65 @@ function startQuoteReader(idx) {
     const quoteByMap = { ...(appState.quoteTableByIdx[idx] || {}) };
 
     try {
-      await Promise.all(
-        mapNames.map(async (mapName) => {
-          const startedAt = Date.now();
+      const startedAt = Date.now();
+      const batchRes = await window.shm.readQuotes(mapNames);
+      const latencyMs = Date.now() - startedAt;
 
-          try {
-            const res = await window.shm.readQuote(mapName);
-            const latencyMs = Date.now() - startedAt;
-            const stat = metricsByMap[mapName] || {
-              prevTs: 0,
-              maxLatencyMs: 0,
-              totalLatencyMs: 0,
-              samples: 0,
-            };
+      const rows = Array.isArray(batchRes?.data) ? batchRes.data : [];
+      const byMapName = Object.fromEntries(rows.map((r) => [String(r?.map_name || "").trim(), r]));
 
-            stat.samples += 1;
-            stat.totalLatencyMs += latencyMs;
-            stat.maxLatencyMs = Math.max(stat.maxLatencyMs, latencyMs);
+      mapNames.forEach((mapName) => {
+        const stat = metricsByMap[mapName] || {
+          prevTs: 0,
+          maxLatencyMs: 0,
+          totalLatencyMs: 0,
+          samples: 0,
+        };
 
-            const nowTs = Date.now();
-            const tps = stat.prevTs > 0 ? 1000 / Math.max(1, nowTs - stat.prevTs) : 0;
-            stat.prevTs = nowTs;
-            metricsByMap[mapName] = stat;
+        stat.samples += 1;
+        stat.totalLatencyMs += latencyMs;
+        stat.maxLatencyMs = Math.max(stat.maxLatencyMs, latencyMs);
 
-            if (res?.status === "FOUND" && res?.data) {
-              quoteByMap[mapName] = {
-                ...res.data,
-                status: "FOUND",
-                latencyMs,
-                tps,
-                maxLatencyMs: stat.maxLatencyMs,
-                avgLatencyMs: stat.totalLatencyMs / stat.samples,
-              };
-              return;
-            }
+        const nowTs = Date.now();
+        const tps = stat.prevTs > 0 ? 1000 / Math.max(1, nowTs - stat.prevTs) : 0;
+        stat.prevTs = nowTs;
+        metricsByMap[mapName] = stat;
 
-            if (res?.status === "NOT_FOUND") {
-              quoteByMap[mapName] = { status: "NOT_FOUND" };
-              return;
-            }
+        const row = byMapName[mapName];
 
-            quoteByMap[mapName] = {
-              status: "ERROR",
-              message: res?.message || "Không đọc được dữ liệu map.",
-            };
-          } catch (err) {
-            quoteByMap[mapName] = {
-              status: "ERROR",
-              message: err?.message || "Lỗi không xác định khi đọc dữ liệu.",
-            };
-          }
-        })
-      );
+        if (row?.status === "FOUND") {
+          quoteByMap[mapName] = {
+            ...row,
+            spread: Number.isFinite(Number(row.spread))
+              ? Number(row.spread)
+              : Number(row.ask) - Number(row.bid),
+            status: "FOUND",
+            latencyMs,
+            tps,
+            maxLatencyMs: stat.maxLatencyMs,
+            avgLatencyMs: stat.totalLatencyMs / stat.samples,
+          };
+          return;
+        }
+
+        if (row?.status === "NOT_FOUND") {
+          quoteByMap[mapName] = { status: "NOT_FOUND" };
+          return;
+        }
+
+        if (!batchRes?.ok) {
+          quoteByMap[mapName] = {
+            status: "ERROR",
+            message: batchRes?.message || "Không đọc được dữ liệu map.",
+          };
+          return;
+        }
+
+        quoteByMap[mapName] = {
+          status: row?.status || "ERROR",
+          message: row?.message || "Không đọc được dữ liệu map.",
+        };
+      });
 
       if (!pollersByIdx[idx] || appState.runStateByIdx[idx] !== "START") {
         return;
