@@ -256,6 +256,12 @@
       min-width: 80px;
     }
 
+    .gap-value {
+      font-weight: 700;
+      color: #0f172a;
+      background: #f8fafc;
+    }
+
     .modal {
       display: none;
       position: fixed;

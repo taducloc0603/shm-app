@@ -26,6 +26,7 @@ const POLL_INTERVAL_MS = 30;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EPOCH_MS_THRESHOLD = 1_000_000_000_000;
+const UINT32_MOD = 2 ** 32;
 
 function getDayMsFromNow(nowMs) {
   const d = new Date(nowMs);
@@ -51,6 +52,13 @@ function calcDayLatency(nowDayMs, tsDayMs) {
   let diff = nowDayMs - tsDayMs;
   if (diff < 0) diff += DAY_MS; // day rollover
   return Number.isFinite(diff) ? Math.max(0, diff) : null;
+}
+
+function calcQuoteSeqDelta(currSeq, prevSeq) {
+  if (!Number.isFinite(currSeq) || !Number.isFinite(prevSeq)) return null;
+  if (currSeq >= prevSeq) return currSeq - prevSeq;
+  // uint32 rollover
+  return (UINT32_MOD - prevSeq) + currSeq;
 }
 
 function calcLatencyFromTimeMsc(ts, nowMs, expectedMs = null) {
@@ -203,6 +211,8 @@ function ensureGlobalPollerRunning() {
         reader.mapNames.forEach((mapName) => {
           const stat = reader.metricsByMap[mapName] || {
             prevTs: 0,
+            prevQuoteSeq: null,
+            prevQuoteSeqTs: 0,
             maxLatencyMs: 0,
             totalLatencyMs: 0,
             latencySamples: 0,
@@ -210,10 +220,25 @@ function ensureGlobalPollerRunning() {
 
           const row = byMapName[mapName];
 
-          const tps = stat.prevTs > 0 ? 1000 / Math.max(1, nowTs - stat.prevTs) : 0;
+          let tps = 0;
+          const pollerTps = stat.prevTs > 0 ? 1000 / Math.max(1, nowTs - stat.prevTs) : 0;
           stat.prevTs = nowTs;
 
           if (row?.status === "FOUND") {
+            const quoteSeq = Number(row.quote_seq);
+            if (Number.isFinite(quoteSeq) && quoteSeq >= 0) {
+              const deltaMs = nowTs - Number(stat.prevQuoteSeqTs || 0);
+              const seqDelta = calcQuoteSeqDelta(quoteSeq, Number(stat.prevQuoteSeq));
+              if (Number.isFinite(seqDelta) && deltaMs > 0) {
+                tps = (seqDelta * 1000) / deltaMs;
+              }
+              stat.prevQuoteSeq = quoteSeq;
+              stat.prevQuoteSeqTs = nowTs;
+            } else {
+              // fallback khi thiếu quote_seq
+              tps = pollerTps;
+            }
+
             const effectiveLatencyMs = getEffectiveLatencyMs(row, fallbackLatencyMs);
             stat.totalLatencyMs += effectiveLatencyMs;
             stat.latencySamples = (stat.latencySamples || 0) + 1;
@@ -299,6 +324,8 @@ function startQuoteReader(idx) {
   mapNames.forEach((name) => {
     metricsByMap[name] = {
       prevTs: 0,
+      prevQuoteSeq: null,
+      prevQuoteSeqTs: 0,
       maxLatencyMs: 0,
       totalLatencyMs: 0,
       latencySamples: 0,

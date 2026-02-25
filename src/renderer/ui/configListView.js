@@ -29,6 +29,42 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
       String(d.getMilliseconds()).padStart(3, "0");
   }
 
+  function formatGapValue(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "-";
+    return n.toFixed(2);
+  }
+
+  function getGapValues(sans, quoteByMap, point) {
+    if (!Array.isArray(sans) || sans.length !== 2) {
+      return { gapBuy: null, gapSell: null };
+    }
+
+    const mapA = sans[0];
+    const mapB = sans[1];
+    const quoteA = quoteByMap?.[mapA];
+    const quoteB = quoteByMap?.[mapB];
+
+    if (quoteA?.status !== "FOUND" || quoteB?.status !== "FOUND") {
+      return { gapBuy: null, gapSell: null };
+    }
+
+    const askA = Number(quoteA.ask);
+    const bidA = Number(quoteA.bid);
+    const askB = Number(quoteB.ask);
+    const bidB = Number(quoteB.bid);
+    const pointValue = Number(point);
+
+    if (![askA, bidA, askB, bidB, pointValue].every(Number.isFinite)) {
+      return { gapBuy: null, gapSell: null };
+    }
+
+    return {
+      gapBuy: (bidB - askA) * pointValue,
+      gapSell: (askB - bidA) * pointValue,
+    };
+  }
+
   function getCellText(cell, field) {
     if (!cell || cell.status === "END") return "-";
 
@@ -83,6 +119,7 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
       const isActive = idx === state.activeConfigIdx;
       const runState = state.runStateByIdx[idx] || "END";
       const quoteByMap = state.quoteTableByIdx[idx] || {};
+      const { gapBuy, gapSell } = getGapValues(sans, quoteByMap, it.point);
       const headerCols = sans.length
         ? sans.map((s) => `<th>${escapeHtml(s)}</th>`).join("")
         : "<th>(chưa có sàn)</th>";
@@ -168,6 +205,14 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
                   <tr>
                     <td class="row-label">Status</td>
                     ${makeRowCells("status")}
+                  </tr>
+                  <tr>
+                    <td class="row-label">GAP_BUY</td>
+                    <td colspan="${Math.max(1, sans.length)}" class="gap-value">${escapeHtml(formatGapValue(gapBuy))}</td>
+                  </tr>
+                  <tr>
+                    <td class="row-label">GAP_SELL</td>
+                    <td colspan="${Math.max(1, sans.length)}" class="gap-value">${escapeHtml(formatGapValue(gapSell))}</td>
                   </tr>
                 </tbody>
               </table>
