@@ -23,6 +23,8 @@ const globalPoller = {
   running: false,
 };
 const POLL_INTERVAL_MS = 30;
+const TPS_ROLLING_WINDOW_MS = 1000;
+const BANGKOK_TZ_OFFSET_MINUTES = 7 * 60;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EPOCH_MS_THRESHOLD = 1_000_000_000_000;
@@ -101,6 +103,162 @@ function getEffectiveLatencyMs(row, fallbackMs) {
   const fallback = Number(fallbackMs);
   if (!Number.isFinite(fallback)) return 0;
   return Math.max(0, fallback);
+}
+
+function formatIsoWithFixedOffset(nowMs, offsetMinutes = BANGKOK_TZ_OFFSET_MINUTES) {
+  const utcMs = Number(nowMs);
+  if (!Number.isFinite(utcMs)) return "";
+
+  const shifted = new Date(utcMs + offsetMinutes * 60 * 1000);
+  const y = shifted.getUTCFullYear();
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(shifted.getUTCDate()).padStart(2, "0");
+  const hh = String(shifted.getUTCHours()).padStart(2, "0");
+  const mm = String(shifted.getUTCMinutes()).padStart(2, "0");
+  const ss = String(shifted.getUTCSeconds()).padStart(2, "0");
+  const ms = String(shifted.getUTCMilliseconds()).padStart(3, "0");
+
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMinutes);
+  const tzH = String(Math.floor(abs / 60)).padStart(2, "0");
+  const tzM = String(abs % 60).padStart(2, "0");
+  return `${y}-${m}-${d}T${hh}:${mm}:${ss}.${ms}${sign}${tzH}:${tzM}`;
+}
+
+function createHoldState() {
+  return {
+    holding: false,
+    windowStart: 0,
+    log: [],
+  };
+}
+
+function resetHoldState(sideState) {
+  sideState.holding = false;
+  sideState.windowStart = 0;
+  sideState.log = [];
+}
+
+function calcSignalGaps(config, quoteByMap) {
+  const sans = normalizeSans(config?.sans);
+  if (sans.length !== 2) {
+    return { gapBuy: null, gapSell: null, exchangeA: "", exchangeB: "" };
+  }
+
+  const exchangeA = sans[0];
+  const exchangeB = sans[1];
+  const quoteA = quoteByMap?.[exchangeA];
+  const quoteB = quoteByMap?.[exchangeB];
+  if (quoteA?.status !== "FOUND" || quoteB?.status !== "FOUND") {
+    return { gapBuy: null, gapSell: null, exchangeA, exchangeB };
+  }
+
+  const askA = Number(quoteA.ask);
+  const bidA = Number(quoteA.bid);
+  const askB = Number(quoteB.ask);
+  const bidB = Number(quoteB.bid);
+  const pointValue = Number(config?.point);
+
+  if (![askA, bidA, askB, bidB, pointValue].every(Number.isFinite)) {
+    return { gapBuy: null, gapSell: null, exchangeA, exchangeB };
+  }
+
+  return {
+    gapBuy: (bidB - askA) * pointValue,
+    gapSell: (askB - bidA) * pointValue,
+    exchangeA,
+    exchangeB,
+  };
+}
+
+function enqueueCsvLog(reader, row) {
+  if (!reader?.signal?.csvSessionId) return;
+
+  window.shm
+    .enqueueCsvRow(reader.signal.csvSessionId, row)
+    .catch((err) => console.error("CSV enqueue failed:", err));
+}
+
+function processBuySignal(reader, gapBuy, isoTime, nowMs) {
+  const signal = reader?.signal;
+  if (!signal) return;
+  if (!Number.isFinite(gapBuy)) return;
+
+  const confirmGapPts = signal.confirmGapPts;
+  const openPts = signal.openPts;
+  const holdMs = signal.holdConfirmMs;
+  const state = signal.buyState;
+
+  if (!state.holding) {
+    if (gapBuy >= confirmGapPts) {
+      state.holding = true;
+      state.windowStart = nowMs;
+      state.log = [gapBuy];
+    }
+    return;
+  }
+
+  if (gapBuy < confirmGapPts) {
+    resetHoldState(state);
+    return;
+  }
+
+  state.log.push(gapBuy);
+  const duration = nowMs - state.windowStart;
+  if (duration < holdMs) return;
+
+  if (gapBuy >= openPts) {
+    enqueueCsvLog(reader, {
+      Time: isoTime,
+      Type: "BUY",
+      San: signal.sanLabel,
+      GAP: String(gapBuy),
+      LogGAP: state.log.map((v) => String(v)).join("|"),
+    });
+  }
+
+  resetHoldState(state);
+}
+
+function processSellSignal(reader, gapSell, isoTime, nowMs) {
+  const signal = reader?.signal;
+  if (!signal) return;
+  if (!Number.isFinite(gapSell)) return;
+
+  const confirmGapPts = signal.confirmGapPts;
+  const openPts = signal.openPts;
+  const holdMs = signal.holdConfirmMs;
+  const state = signal.sellState;
+
+  if (!state.holding) {
+    if (gapSell <= -confirmGapPts) {
+      state.holding = true;
+      state.windowStart = nowMs;
+      state.log = [gapSell];
+    }
+    return;
+  }
+
+  if (gapSell > -confirmGapPts) {
+    resetHoldState(state);
+    return;
+  }
+
+  state.log.push(gapSell);
+  const duration = nowMs - state.windowStart;
+  if (duration < holdMs) return;
+
+  if (gapSell <= -openPts) {
+    enqueueCsvLog(reader, {
+      Time: isoTime,
+      Type: "SELL",
+      San: signal.sanLabel,
+      GAP: String(gapSell),
+      LogGAP: state.log.map((v) => String(v)).join("|"),
+    });
+  }
+
+  resetHoldState(state);
 }
 
 const setLoading = createLoadingOverlay(
@@ -212,7 +370,8 @@ function ensureGlobalPollerRunning() {
           const stat = reader.metricsByMap[mapName] || {
             prevTs: 0,
             prevQuoteSeq: null,
-            prevQuoteSeqTs: 0,
+            cumulativeTicks: 0,
+            tickSamples: [],
             maxLatencyMs: 0,
             totalLatencyMs: 0,
             latencySamples: 0,
@@ -227,13 +386,32 @@ function ensureGlobalPollerRunning() {
           if (row?.status === "FOUND") {
             const quoteSeq = Number(row.quote_seq);
             if (Number.isFinite(quoteSeq) && quoteSeq >= 0) {
-              const deltaMs = nowTs - Number(stat.prevQuoteSeqTs || 0);
-              const seqDelta = calcQuoteSeqDelta(quoteSeq, Number(stat.prevQuoteSeq));
-              if (Number.isFinite(seqDelta) && deltaMs > 0) {
-                tps = (seqDelta * 1000) / deltaMs;
+              const prevQuoteSeq = Number(stat.prevQuoteSeq);
+              const seqDelta = calcQuoteSeqDelta(quoteSeq, prevQuoteSeq);
+              if (Number.isFinite(seqDelta) && seqDelta >= 0) {
+                stat.cumulativeTicks = Number(stat.cumulativeTicks || 0) + seqDelta;
               }
+
+              const samples = Array.isArray(stat.tickSamples) ? stat.tickSamples : [];
+              samples.push({ ts: nowTs, ticks: Number(stat.cumulativeTicks || 0) });
+
+              const minTs = nowTs - TPS_ROLLING_WINDOW_MS;
+              while (samples.length > 1 && samples[0].ts < minTs) {
+                samples.shift();
+              }
+
+              if (samples.length >= 2) {
+                const first = samples[0];
+                const last = samples[samples.length - 1];
+                const dt = last.ts - first.ts;
+                const tickDelta = last.ticks - first.ticks;
+                if (dt > 0 && Number.isFinite(tickDelta) && tickDelta >= 0) {
+                  tps = (tickDelta * 1000) / dt;
+                }
+              }
+
+              stat.tickSamples = samples;
               stat.prevQuoteSeq = quoteSeq;
-              stat.prevQuoteSeqTs = nowTs;
             } else {
               // fallback khi thiếu quote_seq
               tps = pollerTps;
@@ -273,6 +451,14 @@ function ensureGlobalPollerRunning() {
         });
 
         appState.quoteTableByIdx[idx] = quoteByMap;
+
+        const config = appState.displayedConfigs[idx];
+        const nowMs = Date.now();
+        const isoTime = formatIsoWithFixedOffset(nowMs);
+        const { gapBuy, gapSell } = calcSignalGaps(config, quoteByMap);
+
+        processBuySignal(reader, gapBuy, isoTime, nowMs);
+        processSellSignal(reader, gapSell, isoTime, nowMs);
       });
 
       configListView.render(appState.displayedConfigs);
@@ -286,6 +472,13 @@ function ensureGlobalPollerRunning() {
 }
 
 function stopQuoteReader(idx) {
+  const reader = activeReadersByIdx[idx];
+  if (reader?.signal?.csvSessionId) {
+    window.shm
+      .endCsvSession(reader.signal.csvSessionId)
+      .catch((err) => console.error("CSV endSession failed:", err));
+  }
+
   delete activeReadersByIdx[idx];
 
   appState.runStateByIdx[idx] = "END";
@@ -297,12 +490,12 @@ function stopQuoteReader(idx) {
 
 function stopAllQuoteReaders() {
   Object.keys(activeReadersByIdx).forEach((key) => {
-    delete activeReadersByIdx[key];
+    stopQuoteReader(Number(key));
   });
   stopGlobalPollerIfIdle();
 }
 
-function startQuoteReader(idx) {
+async function startQuoteReader(idx) {
   const config = appState.displayedConfigs[idx];
   const mapNames = normalizeSans(config?.sans)
     .map((v) => String(v || "").trim())
@@ -325,7 +518,8 @@ function startQuoteReader(idx) {
     metricsByMap[name] = {
       prevTs: 0,
       prevQuoteSeq: null,
-      prevQuoteSeqTs: 0,
+      cumulativeTicks: 0,
+      tickSamples: [],
       maxLatencyMs: 0,
       totalLatencyMs: 0,
       latencySamples: 0,
@@ -335,7 +529,33 @@ function startQuoteReader(idx) {
   activeReadersByIdx[idx] = {
     mapNames,
     metricsByMap,
+    signal: {
+      buyState: createHoldState(),
+      sellState: createHoldState(),
+      confirmGapPts: Number(config.confirm_gap_pts) || 0,
+      openPts: Number(config.open_pts) || 0,
+      holdConfirmMs: Math.max(0, Number(config.hold_confirm_ms) || 0),
+      sanLabel: `${mapNames[0] || ""}-${mapNames[1] || ""}`,
+      csvSessionId: null,
+    },
   };
+
+  try {
+    const startTimestamp = Date.now();
+    const sessionRes = await window.shm.startCsvSession(startTimestamp);
+    if (sessionRes?.ok && activeReadersByIdx[idx]) {
+      activeReadersByIdx[idx].signal.csvSessionId = sessionRes.sessionId;
+    } else if (sessionRes?.ok) {
+      // Reader đã bị stop trong lúc chờ tạo session => đóng session để tránh leak file handle.
+      window.shm
+        .endCsvSession(sessionRes.sessionId)
+        .catch((err) => console.error("CSV cleanup failed:", err));
+    } else if (!sessionRes?.ok) {
+      console.error("Không tạo được CSV session:", sessionRes?.message || "Unknown error");
+    }
+  } catch (err) {
+    console.error("Không tạo được CSV session:", err);
+  }
 
   configListView.render(appState.displayedConfigs);
   ensureGlobalPollerRunning();
