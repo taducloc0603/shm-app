@@ -1,8 +1,8 @@
-name: Build & Release Windows (dev)
+name: Build & Release Windows (multi-process)
 
 on:
   push:
-    branches: [dev]
+    branches: [multi-process]
   workflow_dispatch:
 
 permissions:

@@ -8,6 +8,12 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
     return n.toFixed(digits);
   }
 
+  function formatTrimTrailingZeros(value, digits = 5) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "-";
+    return n.toFixed(digits).replace(/\.?0+$/, "");
+  }
+
   function formatLatency(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return "--";
@@ -82,9 +88,9 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
       case "symbol":
         return cell.symbol || "-";
       case "bid":
-        return formatNumber(cell.bid, 5);
+        return formatTrimTrailingZeros(cell.bid, 5);
       case "ask":
-        return formatNumber(cell.ask, 5);
+        return formatTrimTrailingZeros(cell.ask, 5);
       case "spread":
         return formatNumber(cell.spread, 5);
       case "latencyMs":

@@ -139,36 +139,48 @@ function resetHoldState(sideState) {
   sideState.log = [];
 }
 
-function calcSignalGaps(config, quoteByMap) {
-  const sans = normalizeSans(config?.sans);
-  if (sans.length !== 2) {
-    return { gapBuy: null, gapSell: null, exchangeA: "", exchangeB: "" };
-  }
+function stablePairKey(exchangeA, exchangeB) {
+  return [String(exchangeA || "").trim(), String(exchangeB || "").trim()]
+    .sort((a, b) => a.localeCompare(b))
+    .join("-");
+}
 
-  const exchangeA = sans[0];
-  const exchangeB = sans[1];
+function getOrCreatePairState(pairStates, pairKey) {
+  let pairState = pairStates.get(pairKey);
+  if (!pairState) {
+    pairState = {
+      buyState: createHoldState(),
+      sellState: createHoldState(),
+    };
+    pairStates.set(pairKey, pairState);
+  }
+  return pairState;
+}
+
+function calcPairGaps(quoteByMap, exchangeA, exchangeB, pointValue) {
   const quoteA = quoteByMap?.[exchangeA];
   const quoteB = quoteByMap?.[exchangeB];
   if (quoteA?.status !== "FOUND" || quoteB?.status !== "FOUND") {
-    return { gapBuy: null, gapSell: null, exchangeA, exchangeB };
+    return null;
   }
 
   const askA = Number(quoteA.ask);
   const bidA = Number(quoteA.bid);
   const askB = Number(quoteB.ask);
   const bidB = Number(quoteB.bid);
-  const pointValue = Number(config?.point);
+  const point = Number(pointValue);
 
-  if (![askA, bidA, askB, bidB, pointValue].every(Number.isFinite)) {
-    return { gapBuy: null, gapSell: null, exchangeA, exchangeB };
+  if (![askA, bidA, askB, bidB, point].every(Number.isFinite)) {
+    return null;
   }
 
-  return {
-    gapBuy: (bidB - askA) * pointValue,
-    gapSell: (askB - bidA) * pointValue,
-    exchangeA,
-    exchangeB,
-  };
+  const gapBuy = (bidB - askA) * point;
+  const gapSell = (askB - bidA) * point;
+  if (!Number.isFinite(gapBuy) || !Number.isFinite(gapSell)) {
+    return null;
+  }
+
+  return { gapBuy, gapSell };
 }
 
 function enqueueCsvLog(reader, row) {
@@ -179,21 +191,22 @@ function enqueueCsvLog(reader, row) {
     .catch((err) => console.error("CSV enqueue failed:", err));
 }
 
-function processBuySignal(reader, gapBuy, isoTime, nowMs) {
+function processBuySignal(reader, pairKey, pairState, gapBuy, isoTime, nowMs) {
   const signal = reader?.signal;
   if (!signal) return;
   if (!Number.isFinite(gapBuy)) return;
+  const gapBuyInt = Math.round(gapBuy);
 
   const confirmGapPts = signal.confirmGapPts;
   const openPts = signal.openPts;
   const holdMs = signal.holdConfirmMs;
-  const state = signal.buyState;
+  const state = pairState.buyState;
 
   if (!state.holding) {
     if (gapBuy >= confirmGapPts) {
       state.holding = true;
       state.windowStart = nowMs;
-      state.log = [gapBuy];
+      state.log = [gapBuyInt];
     }
     return;
   }
@@ -203,7 +216,7 @@ function processBuySignal(reader, gapBuy, isoTime, nowMs) {
     return;
   }
 
-  state.log.push(gapBuy);
+  state.log.push(gapBuyInt);
   const duration = nowMs - state.windowStart;
   if (duration < holdMs) return;
 
@@ -211,8 +224,8 @@ function processBuySignal(reader, gapBuy, isoTime, nowMs) {
     enqueueCsvLog(reader, {
       Time: isoTime,
       Type: "BUY",
-      San: signal.sanLabel,
-      GAP: String(gapBuy),
+      San: pairKey,
+      GAP: String(gapBuyInt),
       LogGAP: state.log.map((v) => String(v)).join("|"),
     });
   }
@@ -220,21 +233,22 @@ function processBuySignal(reader, gapBuy, isoTime, nowMs) {
   resetHoldState(state);
 }
 
-function processSellSignal(reader, gapSell, isoTime, nowMs) {
+function processSellSignal(reader, pairKey, pairState, gapSell, isoTime, nowMs) {
   const signal = reader?.signal;
   if (!signal) return;
   if (!Number.isFinite(gapSell)) return;
+  const gapSellInt = Math.round(gapSell);
 
   const confirmGapPts = signal.confirmGapPts;
   const openPts = signal.openPts;
   const holdMs = signal.holdConfirmMs;
-  const state = signal.sellState;
+  const state = pairState.sellState;
 
   if (!state.holding) {
     if (gapSell <= -confirmGapPts) {
       state.holding = true;
       state.windowStart = nowMs;
-      state.log = [gapSell];
+      state.log = [gapSellInt];
     }
     return;
   }
@@ -244,7 +258,7 @@ function processSellSignal(reader, gapSell, isoTime, nowMs) {
     return;
   }
 
-  state.log.push(gapSell);
+  state.log.push(gapSellInt);
   const duration = nowMs - state.windowStart;
   if (duration < holdMs) return;
 
@@ -252,8 +266,8 @@ function processSellSignal(reader, gapSell, isoTime, nowMs) {
     enqueueCsvLog(reader, {
       Time: isoTime,
       Type: "SELL",
-      San: signal.sanLabel,
-      GAP: String(gapSell),
+      San: pairKey,
+      GAP: String(gapSellInt),
       LogGAP: state.log.map((v) => String(v)).join("|"),
     });
   }
@@ -455,10 +469,28 @@ function ensureGlobalPollerRunning() {
         const config = appState.displayedConfigs[idx];
         const nowMs = Date.now();
         const isoTime = formatIsoWithFixedOffset(nowMs);
-        const { gapBuy, gapSell } = calcSignalGaps(config, quoteByMap);
+        const pointValue = Number(config?.point);
+        const exchanges = Array.isArray(reader.mapNames) ? reader.mapNames : [];
+        const processedPairKeys = new Set();
 
-        processBuySignal(reader, gapBuy, isoTime, nowMs);
-        processSellSignal(reader, gapSell, isoTime, nowMs);
+        for (let i = 0; i < exchanges.length; i += 1) {
+          for (let j = i + 1; j < exchanges.length; j += 1) {
+            const exchangeA = String(exchanges[i] || "").trim();
+            const exchangeB = String(exchanges[j] || "").trim();
+            if (!exchangeA || !exchangeB || exchangeA === exchangeB) continue;
+
+            const pairKey = stablePairKey(exchangeA, exchangeB);
+            if (processedPairKeys.has(pairKey)) continue;
+            processedPairKeys.add(pairKey);
+
+            const gaps = calcPairGaps(quoteByMap, exchangeA, exchangeB, pointValue);
+            if (!gaps) continue;
+
+            const pairState = getOrCreatePairState(reader.signal.pairStates, pairKey);
+            processBuySignal(reader, pairKey, pairState, gaps.gapBuy, isoTime, nowMs);
+            processSellSignal(reader, pairKey, pairState, gaps.gapSell, isoTime, nowMs);
+          }
+        }
       });
 
       configListView.render(appState.displayedConfigs);
@@ -530,12 +562,10 @@ async function startQuoteReader(idx) {
     mapNames,
     metricsByMap,
     signal: {
-      buyState: createHoldState(),
-      sellState: createHoldState(),
       confirmGapPts: Number(config.confirm_gap_pts) || 0,
       openPts: Number(config.open_pts) || 0,
       holdConfirmMs: Math.max(0, Number(config.hold_confirm_ms) || 0),
-      sanLabel: `${mapNames[0] || ""}-${mapNames[1] || ""}`,
+      pairStates: new Map(),
       csvSessionId: null,
     },
   };
