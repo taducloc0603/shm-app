@@ -21,8 +21,10 @@ const globalPoller = {
   timer: null,
   inFlight: false,
   running: false,
+  lastRenderAt: 0,
 };
 const POLL_INTERVAL_MS = 30;
+const RENDER_INTERVAL_MS = 150;
 const TPS_ROLLING_WINDOW_MS = 1000;
 const BANGKOK_TZ_OFFSET_MINUTES = 7 * 60;
 
@@ -191,11 +193,18 @@ function enqueueCsvLog(reader, row) {
     .catch((err) => console.error("CSV enqueue failed:", err));
 }
 
+function roundTo2(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 function processBuySignal(reader, pairKey, pairState, gapBuy, isoTime, nowMs) {
   const signal = reader?.signal;
   if (!signal) return;
   if (!Number.isFinite(gapBuy)) return;
-  const gapBuyInt = Math.round(gapBuy);
+  const gapBuyRounded = roundTo2(gapBuy);
+  if (!Number.isFinite(gapBuyRounded)) return;
 
   const confirmGapPts = signal.confirmGapPts;
   const openPts = signal.openPts;
@@ -206,7 +215,7 @@ function processBuySignal(reader, pairKey, pairState, gapBuy, isoTime, nowMs) {
     if (gapBuy >= confirmGapPts) {
       state.holding = true;
       state.windowStart = nowMs;
-      state.log = [gapBuyInt];
+      state.log = [gapBuyRounded];
     }
     return;
   }
@@ -216,7 +225,7 @@ function processBuySignal(reader, pairKey, pairState, gapBuy, isoTime, nowMs) {
     return;
   }
 
-  state.log.push(gapBuyInt);
+  state.log.push(gapBuyRounded);
   const duration = nowMs - state.windowStart;
   if (duration < holdMs) return;
 
@@ -225,8 +234,8 @@ function processBuySignal(reader, pairKey, pairState, gapBuy, isoTime, nowMs) {
       Time: isoTime,
       Type: "BUY",
       San: pairKey,
-      GAP: String(gapBuyInt),
-      LogGAP: state.log.map((v) => String(v)).join("|"),
+      GAP: gapBuyRounded.toFixed(2),
+      LogGAP: state.log.map((v) => Number(v).toFixed(2)).join("|"),
     });
   }
 
@@ -237,7 +246,8 @@ function processSellSignal(reader, pairKey, pairState, gapSell, isoTime, nowMs) 
   const signal = reader?.signal;
   if (!signal) return;
   if (!Number.isFinite(gapSell)) return;
-  const gapSellInt = Math.round(gapSell);
+  const gapSellRounded = roundTo2(gapSell);
+  if (!Number.isFinite(gapSellRounded)) return;
 
   const confirmGapPts = signal.confirmGapPts;
   const openPts = signal.openPts;
@@ -248,7 +258,7 @@ function processSellSignal(reader, pairKey, pairState, gapSell, isoTime, nowMs) 
     if (gapSell <= -confirmGapPts) {
       state.holding = true;
       state.windowStart = nowMs;
-      state.log = [gapSellInt];
+      state.log = [gapSellRounded];
     }
     return;
   }
@@ -258,7 +268,7 @@ function processSellSignal(reader, pairKey, pairState, gapSell, isoTime, nowMs) 
     return;
   }
 
-  state.log.push(gapSellInt);
+  state.log.push(gapSellRounded);
   const duration = nowMs - state.windowStart;
   if (duration < holdMs) return;
 
@@ -267,8 +277,8 @@ function processSellSignal(reader, pairKey, pairState, gapSell, isoTime, nowMs) 
       Time: isoTime,
       Type: "SELL",
       San: pairKey,
-      GAP: String(gapSellInt),
-      LogGAP: state.log.map((v) => String(v)).join("|"),
+      GAP: gapSellRounded.toFixed(2),
+      LogGAP: state.log.map((v) => Number(v).toFixed(2)).join("|"),
     });
   }
 
@@ -327,6 +337,7 @@ function stopGlobalPollerIfIdle() {
   }
   globalPoller.inFlight = false;
   globalPoller.running = false;
+  globalPoller.lastRenderAt = 0;
 }
 
 function ensureGlobalPollerRunning() {
@@ -493,7 +504,10 @@ function ensureGlobalPollerRunning() {
         }
       });
 
-      configListView.render(appState.displayedConfigs);
+      if (nowTs - globalPoller.lastRenderAt >= RENDER_INTERVAL_MS) {
+        configListView.render(appState.displayedConfigs);
+        globalPoller.lastRenderAt = nowTs;
+      }
     } finally {
       globalPoller.inFlight = false;
       scheduleNext();

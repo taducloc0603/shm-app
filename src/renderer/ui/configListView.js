@@ -41,34 +41,45 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
     return n.toFixed(2);
   }
 
-  function getGapValues(sans, quoteByMap, point) {
-    if (!Array.isArray(sans) || sans.length !== 2) {
-      return { gapBuy: null, gapSell: null };
-    }
+  function getPairGapValues(sans, quoteByMap, point) {
+    if (!Array.isArray(sans) || sans.length < 2) return [];
 
-    const mapA = sans[0];
-    const mapB = sans[1];
-    const quoteA = quoteByMap?.[mapA];
-    const quoteB = quoteByMap?.[mapB];
-
-    if (quoteA?.status !== "FOUND" || quoteB?.status !== "FOUND") {
-      return { gapBuy: null, gapSell: null };
-    }
-
-    const askA = Number(quoteA.ask);
-    const bidA = Number(quoteA.bid);
-    const askB = Number(quoteB.ask);
-    const bidB = Number(quoteB.bid);
     const pointValue = Number(point);
+    if (!Number.isFinite(pointValue)) return [];
 
-    if (![askA, bidA, askB, bidB, pointValue].every(Number.isFinite)) {
-      return { gapBuy: null, gapSell: null };
+    const pairs = [];
+
+    for (let i = 0; i < sans.length; i += 1) {
+      for (let j = i + 1; j < sans.length; j += 1) {
+        const mapA = sans[i];
+        const mapB = sans[j];
+        const quoteA = quoteByMap?.[mapA];
+        const quoteB = quoteByMap?.[mapB];
+
+        let gapBuy = null;
+        let gapSell = null;
+
+        if (quoteA?.status === "FOUND" && quoteB?.status === "FOUND") {
+          const askA = Number(quoteA.ask);
+          const bidA = Number(quoteA.bid);
+          const askB = Number(quoteB.ask);
+          const bidB = Number(quoteB.bid);
+
+          if ([askA, bidA, askB, bidB].every(Number.isFinite)) {
+            gapBuy = (bidB - askA) * pointValue;
+            gapSell = (askB - bidA) * pointValue;
+          }
+        }
+
+        pairs.push({
+          pairLabel: `${mapA}-${mapB}`,
+          gapBuy,
+          gapSell,
+        });
+      }
     }
 
-    return {
-      gapBuy: (bidB - askA) * pointValue,
-      gapSell: (askB - bidA) * pointValue,
-    };
+    return pairs;
   }
 
   function getCellText(cell, field) {
@@ -92,7 +103,7 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
       case "ask":
         return formatTrimTrailingZeros(cell.ask, 5);
       case "spread":
-        return formatNumber(cell.spread, 5);
+        return formatTrimTrailingZeros(cell.spread, 5);
       case "latencyMs":
         return formatLatency(cell.latencyMs);
       case "tps":
@@ -125,7 +136,7 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
       const isActive = idx === state.activeConfigIdx;
       const runState = state.runStateByIdx[idx] || "END";
       const quoteByMap = state.quoteTableByIdx[idx] || {};
-      const { gapBuy, gapSell } = getGapValues(sans, quoteByMap, it.point);
+      const pairGaps = getPairGapValues(sans, quoteByMap, it.point);
       const headerCols = sans.length
         ? sans.map((s) => `<th>${escapeHtml(s)}</th>`).join("")
         : "<th>(chưa có sàn)</th>";
@@ -135,6 +146,36 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
             .map((mapName) => `<td>${escapeHtml(getCellText(quoteByMap[mapName], field))}</td>`)
             .join("")
         : "<td>-</td>";
+
+      const gapRowsHtml = pairGaps.length
+        ? pairGaps
+            .map((pair, pairIdx) => `
+                  <tr class="gap-pair-header">
+                    <td colspan="${Math.max(2, sans.length + 1)}">Cặp sàn: ${escapeHtml(pair.pairLabel)}</td>
+                  </tr>
+                  <tr class="gap-row">
+                    <td class="row-label gap-sub-label">GAP_BUY</td>
+                    <td colspan="${Math.max(1, sans.length)}" class="gap-value gap-buy-value">${escapeHtml(formatGapValue(pair.gapBuy))}</td>
+                  </tr>
+                  <tr class="gap-row">
+                    <td class="row-label gap-sub-label">GAP_SELL</td>
+                    <td colspan="${Math.max(1, sans.length)}" class="gap-value gap-sell-value">${escapeHtml(formatGapValue(pair.gapSell))}</td>
+                  </tr>
+                  ${pairIdx < pairGaps.length - 1
+                    ? `<tr class="gap-pair-sep"><td colspan="${Math.max(2, sans.length + 1)}"></td></tr>`
+                    : ""}
+                `)
+            .join("")
+        : `
+                  <tr>
+                    <td class="row-label">GAP_BUY</td>
+                    <td colspan="${Math.max(1, sans.length)}" class="gap-value">-</td>
+                  </tr>
+                  <tr>
+                    <td class="row-label">GAP_SELL</td>
+                    <td colspan="${Math.max(1, sans.length)}" class="gap-value">-</td>
+                  </tr>
+                `;
 
       return `
         <div class="config-card">
@@ -212,14 +253,7 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
                     <td class="row-label">Status</td>
                     ${makeRowCells("status")}
                   </tr>
-                  <tr>
-                    <td class="row-label">GAP_BUY</td>
-                    <td colspan="${Math.max(1, sans.length)}" class="gap-value">${escapeHtml(formatGapValue(gapBuy))}</td>
-                  </tr>
-                  <tr>
-                    <td class="row-label">GAP_SELL</td>
-                    <td colspan="${Math.max(1, sans.length)}" class="gap-value">${escapeHtml(formatGapValue(gapSell))}</td>
-                  </tr>
+                  ${gapRowsHtml}
                 </tbody>
               </table>
             </div>
