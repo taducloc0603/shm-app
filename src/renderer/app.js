@@ -29,7 +29,10 @@ const TPS_ROLLING_WINDOW_MS = 1000;
 const BANGKOK_TZ_OFFSET_MINUTES = 7 * 60;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const EPOCH_SECONDS_THRESHOLD = 1_000_000_000;
 const EPOCH_MS_THRESHOLD = 1_000_000_000_000;
+const EPOCH_US_THRESHOLD = 1_000_000_000_000_000;
+const EPOCH_NS_THRESHOLD = 1_000_000_000_000_000_000;
 const UINT32_MOD = 2 ** 32;
 
 function getDayMsFromNow(nowMs) {
@@ -68,9 +71,24 @@ function calcQuoteSeqDelta(currSeq, prevSeq) {
 function calcLatencyFromTimeMsc(ts, nowMs, expectedMs = null) {
   if (!Number.isFinite(ts) || ts <= 0) return null;
 
-  // Unix epoch milliseconds (e.g. 1700000000000)
-  if (ts >= EPOCH_MS_THRESHOLD) {
-    const diff = nowMs - ts;
+  let normalizedTsMs = null;
+
+  // Epoch nanoseconds
+  if (ts >= EPOCH_NS_THRESHOLD) {
+    normalizedTsMs = ts / 1_000_000;
+  // Epoch microseconds
+  } else if (ts >= EPOCH_US_THRESHOLD) {
+    normalizedTsMs = ts / 1_000;
+  // Epoch milliseconds
+  } else if (ts >= EPOCH_MS_THRESHOLD) {
+    normalizedTsMs = ts;
+  // Epoch seconds
+  } else if (ts >= EPOCH_SECONDS_THRESHOLD) {
+    normalizedTsMs = ts * 1_000;
+  }
+
+  if (Number.isFinite(normalizedTsMs)) {
+    const diff = nowMs - normalizedTsMs;
     return Number.isFinite(diff) ? Math.max(0, diff) : null;
   }
 
@@ -193,17 +211,17 @@ function enqueueCsvLog(reader, row) {
     .catch((err) => console.error("CSV enqueue failed:", err));
 }
 
-function roundTo2(value) {
+function roundToInt(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
-  return Math.round((n + Number.EPSILON) * 100) / 100;
+  return Math.round(n);
 }
 
 function processBuySignal(reader, pairKey, pairState, gapBuy, isoTime, nowMs) {
   const signal = reader?.signal;
   if (!signal) return;
   if (!Number.isFinite(gapBuy)) return;
-  const gapBuyRounded = roundTo2(gapBuy);
+  const gapBuyRounded = roundToInt(gapBuy);
   if (!Number.isFinite(gapBuyRounded)) return;
 
   const confirmGapPts = signal.confirmGapPts;
@@ -234,8 +252,14 @@ function processBuySignal(reader, pairKey, pairState, gapBuy, isoTime, nowMs) {
       Time: isoTime,
       Type: "BUY",
       San: pairKey,
-      GAP: gapBuyRounded.toFixed(2),
-      LogGAP: state.log.map((v) => Number(v).toFixed(2)).join("|"),
+      GAP: String(gapBuyRounded),
+      LogGAP: state.log
+        .map((v) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? String(Math.round(n)) : "";
+        })
+        .filter(Boolean)
+        .join("|"),
     });
   }
 
@@ -246,7 +270,7 @@ function processSellSignal(reader, pairKey, pairState, gapSell, isoTime, nowMs) 
   const signal = reader?.signal;
   if (!signal) return;
   if (!Number.isFinite(gapSell)) return;
-  const gapSellRounded = roundTo2(gapSell);
+  const gapSellRounded = roundToInt(gapSell);
   if (!Number.isFinite(gapSellRounded)) return;
 
   const confirmGapPts = signal.confirmGapPts;
@@ -277,8 +301,14 @@ function processSellSignal(reader, pairKey, pairState, gapSell, isoTime, nowMs) 
       Time: isoTime,
       Type: "SELL",
       San: pairKey,
-      GAP: gapSellRounded.toFixed(2),
-      LogGAP: state.log.map((v) => Number(v).toFixed(2)).join("|"),
+      GAP: String(gapSellRounded),
+      LogGAP: state.log
+        .map((v) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? String(Math.round(n)) : "";
+        })
+        .filter(Boolean)
+        .join("|"),
     });
   }
 

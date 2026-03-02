@@ -38,7 +38,7 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
   function formatGapValue(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return "-";
-    return n.toFixed(2);
+    return String(Math.round(n));
   }
 
   function getPairGapValues(sans, quoteByMap, point) {
