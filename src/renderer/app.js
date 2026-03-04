@@ -29,6 +29,9 @@ const TPS_ROLLING_WINDOW_MS = 1000;
 const BANGKOK_TZ_OFFSET_MINUTES = 7 * 60;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DAY_US = DAY_MS * 1_000;
+const DAY_NS = DAY_MS * 1_000_000;
+const MAX_REASONABLE_LATENCY_MS = 60 * 1000;
 const EPOCH_SECONDS_THRESHOLD = 1_000_000_000;
 const EPOCH_MS_THRESHOLD = 1_000_000_000_000;
 const EPOCH_US_THRESHOLD = 1_000_000_000_000_000;
@@ -82,8 +85,8 @@ function calcLatencyFromTimeMsc(ts, nowMs, expectedMs = null) {
   // Epoch milliseconds
   } else if (ts >= EPOCH_MS_THRESHOLD) {
     normalizedTsMs = ts;
-  // Epoch seconds
-  } else if (ts >= EPOCH_SECONDS_THRESHOLD) {
+  // Epoch seconds (giới hạn upper-bound để tránh nhầm với intraday microseconds)
+  } else if (ts >= EPOCH_SECONDS_THRESHOLD && ts < 10_000_000_000) {
     normalizedTsMs = ts * 1_000;
   }
 
@@ -92,10 +95,19 @@ function calcLatencyFromTimeMsc(ts, nowMs, expectedMs = null) {
     return Number.isFinite(diff) ? Math.max(0, diff) : null;
   }
 
-  // Milliseconds in day (0..86399999)
+  // Intraday timestamp: ms/us/ns kể từ đầu ngày
+  let intradayMs = null;
   if (ts < DAY_MS) {
-    const localDiff = calcDayLatency(getDayMsFromNow(nowMs), ts);
-    const utcDiff = calcDayLatency(getUtcDayMsFromNow(nowMs), ts);
+    intradayMs = ts;
+  } else if (ts < DAY_US) {
+    intradayMs = ts / 1_000;
+  } else if (ts < DAY_NS) {
+    intradayMs = ts / 1_000_000;
+  }
+
+  if (Number.isFinite(intradayMs)) {
+    const localDiff = calcDayLatency(getDayMsFromNow(nowMs), intradayMs);
+    const utcDiff = calcDayLatency(getUtcDayMsFromNow(nowMs), intradayMs);
 
     const candidates = [localDiff, utcDiff].filter((v) => Number.isFinite(v));
     if (!candidates.length) return null;
@@ -118,7 +130,7 @@ function getEffectiveLatencyMs(row, fallbackMs) {
   const nowMs = Date.now();
   const ts = Number(row?.time_msc);
   const parsed = calcLatencyFromTimeMsc(ts, nowMs, fallbackMs);
-  if (Number.isFinite(parsed)) return parsed;
+  if (Number.isFinite(parsed) && parsed <= MAX_REASONABLE_LATENCY_MS) return parsed;
 
   const fallback = Number(fallbackMs);
   if (!Number.isFinite(fallback)) return 0;
