@@ -1,12 +1,9 @@
 import { appState } from "./state/appState.js";
 import { createLoadingOverlay } from "./ui/loadingOverlay.js";
-import { createSupabaseService } from "./services/supabaseService.js";
 import { createSanRows } from "./ui/sanRows.js";
 import { createConfigListView } from "./ui/configListView.js";
 import { getPlatform } from "./services/platformService.js";
 import { normalizeSans } from "./utils/normalizeSans.js";
-
-const supabaseService = createSupabaseService();
 
 const modal = document.getElementById("modal");
 const btnOpen = document.getElementById("btnOpen");
@@ -665,12 +662,13 @@ async function loadConfigs() {
     appState.runStateByIdx = {};
     appState.quoteTableByIdx = {};
 
-    const data = await supabaseService.fetchConfigs();
-    configListView.render([...data].reverse());
+    const data = await window.shm.listConfigs();
+    configListView.render(data);
   } catch (err) {
     console.error(err);
+    const message = err?.message || "Không tải được danh sách cấu hình.";
     listConfigsEl.innerHTML =
-      '<div style="color:#b91c1c;font-weight:600">Không tải được danh sách từ Supabase.</div>';
+      `<div style="color:#b91c1c;font-weight:600">${message}</div>`;
   } finally {
     setLoading(false);
   }
@@ -702,16 +700,34 @@ formCreate.onsubmit = async (e) => {
     return;
   }
 
-  try {
-    await supabaseService.insertConfig(payload);
-  } catch (err) {
-    console.error(err);
-    alert("Lưu thất bại: " + (err?.message || "Không thể kết nối Supabase"));
+  if (!Number.isFinite(payload.point) || !Number.isFinite(payload.open_pts) || !Number.isFinite(payload.confirm_gap_pts)) {
+    alert("point/open_pts/confirm_gap_pts phải là số hợp lệ");
     setLoading(false);
     return;
   }
 
-  alert("Đã lưu lên Supabase!");
+  if (!Number.isFinite(payload.hold_confirm_ms) || payload.hold_confirm_ms <= 0) {
+    alert("hold_confirm_ms phải lớn hơn 0");
+    setLoading(false);
+    return;
+  }
+
+  if (!Array.isArray(payload.sans) || payload.sans.length < 2) {
+    alert("Cần ít nhất 2 sàn (sans)");
+    setLoading(false);
+    return;
+  }
+
+  try {
+    await window.shm.createConfig(payload);
+  } catch (err) {
+    console.error(err);
+    alert("Lưu thất bại: " + (err?.message || "Không thể ghi shm-config.csv"));
+    setLoading(false);
+    return;
+  }
+
+  alert("Đã lưu cấu hình vào shm-config.csv!");
   modal.style.display = "none";
   e.target.reset();
   sanRows.resetRows();

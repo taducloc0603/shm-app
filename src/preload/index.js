@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("shm", {
+  listConfigs: () => ipcRenderer.invoke("config:list"),
+  createConfig: (payload) => ipcRenderer.invoke("config:create", payload),
   check: (mapName) => ipcRenderer.invoke("shm:check", mapName),
   readQuote: (mapName) => ipcRenderer.invoke("shm:readQuote", mapName),
   readQuotes: (mapNames) => ipcRenderer.invoke("shm:readQuotes", mapNames),
