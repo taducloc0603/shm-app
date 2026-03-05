@@ -719,7 +719,17 @@ formCreate.onsubmit = async (e) => {
   }
 
   try {
-    await window.shm.createConfig(payload);
+    const created = await window.shm.createConfig(payload);
+    const writtenPath = created?._meta?.configPath;
+    if (writtenPath) {
+      console.info("[config:create] Saved to:", writtenPath);
+    }
+
+    alert(
+      writtenPath
+        ? `Đã lưu cấu hình vào:\n${writtenPath}`
+        : "Đã lưu cấu hình vào shm-config.csv!"
+    );
   } catch (err) {
     console.error(err);
     alert("Lưu thất bại: " + (err?.message || "Không thể ghi shm-config.csv"));
@@ -727,7 +737,6 @@ formCreate.onsubmit = async (e) => {
     return;
   }
 
-  alert("Đã lưu cấu hình vào shm-config.csv!");
   modal.style.display = "none";
   e.target.reset();
   sanRows.resetRows();

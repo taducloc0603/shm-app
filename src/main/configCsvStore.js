@@ -23,11 +23,19 @@ function getConfigPath() {
   return path.join(desktopDir, "shm-config.csv");
 }
 
-function ensureConfigFileExists() {
+async function ensureConfigFileReady() {
   const configPath = getConfigPath();
+
   if (!fs.existsSync(configPath)) {
-    throw new Error("Không tìm thấy shm-config.csv trên Desktop");
+    const headerOnly = stringify([], {
+      header: true,
+      columns: CSV_HEADERS,
+    });
+
+    await fs.promises.writeFile(configPath, headerOnly, "utf8");
+    console.info(`[config:init] Created ${configPath}`);
   }
+
   return configPath;
 }
 
@@ -103,7 +111,16 @@ function parseConfigRow(row, rowIndex) {
 }
 
 function listConfigs() {
-  const configPath = ensureConfigFileExists();
+  const configPath = getConfigPath();
+  if (!fs.existsSync(configPath)) {
+    const headerOnly = stringify([], {
+      header: true,
+      columns: CSV_HEADERS,
+    });
+    fs.writeFileSync(configPath, headerOnly, "utf8");
+    console.info(`[config:init] Created ${configPath}`);
+  }
+
   const content = fs.readFileSync(configPath, "utf8");
 
   ensureValidHeader(content);
@@ -165,13 +182,24 @@ function validateCreatePayload(payload) {
 
 function appendRecordWithLock(record) {
   const task = async () => {
-    const configPath = ensureConfigFileExists();
-    const line = stringify([record], {
+    const configPath = await ensureConfigFileReady();
+    const content = await fs.promises.readFile(configPath, "utf8");
+    ensureValidHeader(content);
+
+    const needsLeadingNewline = content.length > 0 && !content.endsWith("\n");
+
+    let line = stringify([record], {
       header: false,
       columns: CSV_HEADERS,
     });
 
+    if (needsLeadingNewline) {
+      line = `\n${line}`;
+    }
+
     await fs.promises.appendFile(configPath, line, "utf8");
+    console.info(`[config:create] Appended 1 record to ${configPath}`);
+    return configPath;
   };
 
   appendQueue = appendQueue.then(task, task);
@@ -191,11 +219,14 @@ async function createConfig(payload) {
     created_at: new Date().toISOString(),
   };
 
-  await appendRecordWithLock(record);
+  const configPath = await appendRecordWithLock(record);
 
   return {
     ...record,
     sans: input.sans,
+    _meta: {
+      configPath,
+    },
   };
 }
 
