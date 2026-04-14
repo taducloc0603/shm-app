@@ -278,16 +278,54 @@
       font-weight: 700;
     }
 
-    .gap-buy-value {
-      background: #ecfdf5;
-      color: #166534;
-      font-weight: 800;
+    /* Giữ lại class cũ cho tương thích, nhưng mặc định dim */
+    .gap-buy-value,
+    .gap-sell-value {
+      background: #f8fafc;
+      color: #94a3b8;
+      font-weight: 500;
     }
 
-    .gap-sell-value {
-      background: #fff1f2;
-      color: #9f1239;
+    /* Trạng thái thường: chưa đủ điều kiện arbitrage -> mờ */
+    .gap-buy-dim,
+    .gap-sell-dim {
+      background: #f8fafc;
+      color: #94a3b8;
+      font-weight: 500;
+    }
+
+    /* Trạng thái tín hiệu: GAP_BUY > 0 và GAP_SELL < 0 -> nổi bật */
+    .gap-buy-hot {
+      background: #16a34a;
+      color: #fff;
       font-weight: 800;
+      font-size: 16px;
+    }
+
+    .gap-sell-hot {
+      background: #dc2626;
+      color: #fff;
+      font-weight: 800;
+      font-size: 16px;
+    }
+
+    .gap-buy-hot.arrow-up::before {
+      content: "▲ ";
+      font-size: 11px;
+      vertical-align: middle;
+    }
+
+    .gap-sell-hot.arrow-down::before {
+      content: "▼ ";
+      font-size: 11px;
+      vertical-align: middle;
+    }
+
+    /* Header cặp sàn khi có tín hiệu: đổi màu vàng để scan nhanh */
+    .gap-pair-header.is-signal td {
+      background: #fef3c7;
+      border-top: 2px solid #f59e0b;
+      color: #78350f;
     }
 
     .gap-pair-sep td {

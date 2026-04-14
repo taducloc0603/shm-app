@@ -149,22 +149,33 @@ export function createConfigListView({ listEl, state, onActiveToggle, onRunState
 
       const gapRowsHtml = pairGaps.length
         ? pairGaps
-            .map((pair, pairIdx) => `
-                  <tr class="gap-pair-header">
+            .map((pair, pairIdx) => {
+              const isSignal =
+                Number.isFinite(pair.gapBuy) &&
+                Number.isFinite(pair.gapSell) &&
+                pair.gapBuy > 0 &&
+                pair.gapSell < 0;
+
+              const buyClass = isSignal ? "gap-buy-hot arrow-up" : "gap-buy-dim";
+              const sellClass = isSignal ? "gap-sell-hot arrow-down" : "gap-sell-dim";
+
+              return `
+                  <tr class="gap-pair-header${isSignal ? " is-signal" : ""}">
                     <td colspan="${Math.max(2, sans.length + 1)}">Cặp sàn: ${escapeHtml(pair.pairLabel)}</td>
                   </tr>
                   <tr class="gap-row">
                     <td class="row-label gap-sub-label">GAP_BUY</td>
-                    <td colspan="${Math.max(1, sans.length)}" class="gap-value gap-buy-value">${escapeHtml(formatGapValue(pair.gapBuy))}</td>
+                    <td colspan="${Math.max(1, sans.length)}" class="gap-value ${buyClass}">${escapeHtml(formatGapValue(pair.gapBuy))}</td>
                   </tr>
                   <tr class="gap-row">
                     <td class="row-label gap-sub-label">GAP_SELL</td>
-                    <td colspan="${Math.max(1, sans.length)}" class="gap-value gap-sell-value">${escapeHtml(formatGapValue(pair.gapSell))}</td>
+                    <td colspan="${Math.max(1, sans.length)}" class="gap-value ${sellClass}">${escapeHtml(formatGapValue(pair.gapSell))}</td>
                   </tr>
                   ${pairIdx < pairGaps.length - 1
                     ? `<tr class="gap-pair-sep"><td colspan="${Math.max(2, sans.length + 1)}"></td></tr>`
                     : ""}
-                `)
+                `;
+            })
             .join("")
         : `
                   <tr>
