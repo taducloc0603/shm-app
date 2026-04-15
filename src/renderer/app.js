@@ -213,11 +213,14 @@ function calcPairGaps(quoteByMap, exchangeA, exchangeB, pointValue) {
 }
 
 function enqueueCsvLog(reader, row) {
-  if (!reader?.signal?.csvSessionId) return;
+  // Tạm thời disable ghi log CSV theo yêu cầu: chỉ comment, không xóa code.
+  // if (!reader?.signal?.csvSessionId) return;
 
-  window.shm
-    .enqueueCsvRow(reader.signal.csvSessionId, row)
-    .catch((err) => console.error("CSV enqueue failed:", err));
+  // window.shm
+  //   .enqueueCsvRow(reader.signal.csvSessionId, row)
+  //   .catch((err) => console.error("CSV enqueue failed:", err));
+
+  // no-op
 }
 
 function roundToInt(value) {
@@ -558,11 +561,12 @@ function ensureGlobalPollerRunning() {
 
 function stopQuoteReader(idx) {
   const reader = activeReadersByIdx[idx];
-  if (reader?.signal?.csvSessionId) {
-    window.shm
-      .endCsvSession(reader.signal.csvSessionId)
-      .catch((err) => console.error("CSV endSession failed:", err));
-  }
+  // Tạm thời disable đóng CSV session vì đã tắt hoàn toàn luồng ghi CSV.
+  // if (reader?.signal?.csvSessionId) {
+  //   window.shm
+  //     .endCsvSession(reader.signal.csvSessionId)
+  //     .catch((err) => console.error("CSV endSession failed:", err));
+  // }
 
   delete activeReadersByIdx[idx];
 
@@ -623,22 +627,23 @@ async function startQuoteReader(idx) {
     },
   };
 
-  try {
-    const startTimestamp = Date.now();
-    const sessionRes = await window.shm.startCsvSession(startTimestamp);
-    if (sessionRes?.ok && activeReadersByIdx[idx]) {
-      activeReadersByIdx[idx].signal.csvSessionId = sessionRes.sessionId;
-    } else if (sessionRes?.ok) {
-      // Reader đã bị stop trong lúc chờ tạo session => đóng session để tránh leak file handle.
-      window.shm
-        .endCsvSession(sessionRes.sessionId)
-        .catch((err) => console.error("CSV cleanup failed:", err));
-    } else if (!sessionRes?.ok) {
-      console.error("Không tạo được CSV session:", sessionRes?.message || "Unknown error");
-    }
-  } catch (err) {
-    console.error("Không tạo được CSV session:", err);
-  }
+  // Tạm thời disable tạo CSV session theo yêu cầu: không ghi log data nữa.
+  // try {
+  //   const startTimestamp = Date.now();
+  //   const sessionRes = await window.shm.startCsvSession(startTimestamp);
+  //   if (sessionRes?.ok && activeReadersByIdx[idx]) {
+  //     activeReadersByIdx[idx].signal.csvSessionId = sessionRes.sessionId;
+  //   } else if (sessionRes?.ok) {
+  //     // Reader đã bị stop trong lúc chờ tạo session => đóng session để tránh leak file handle.
+  //     window.shm
+  //       .endCsvSession(sessionRes.sessionId)
+  //       .catch((err) => console.error("CSV cleanup failed:", err));
+  //   } else if (!sessionRes?.ok) {
+  //     console.error("Không tạo được CSV session:", sessionRes?.message || "Unknown error");
+  //   }
+  // } catch (err) {
+  //   console.error("Không tạo được CSV session:", err);
+  // }
 
   configListView.render(appState.displayedConfigs);
   ensureGlobalPollerRunning();
