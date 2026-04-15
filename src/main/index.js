@@ -12,7 +12,7 @@ function isAppExpired(nowMs = Date.now()) {
 function showExpiredAndQuit() {
   dialog.showErrorBox(
     "Ứng dụng đã hết hạn",
-    "Ứng dụng chỉ được sử dụng đến hết ngày 30/04/2026. Vui lòng liên hệ quản trị viên để gia hạn."
+    "Vui lòng liên hệ quản trị viên để gia hạn."
   );
   app.quit();
 }
