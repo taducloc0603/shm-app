@@ -136,7 +136,7 @@ npm run build
 
 ```bash
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Invoke-WebRequest -Uri "LINK_DOWNLOAD_EXE" -OutFile ShmHubSetup.exe
+Invoke-WebRequest -Uri "https://github.com/taducloc0603/split-files/releases/download/v1.0.1/GapLogger.App-1.0.1.exe" -OutFile GapLogger.exe
 ```
 
 ## PowerShell đọc Shared Memory
