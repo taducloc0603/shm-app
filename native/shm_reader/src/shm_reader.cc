@@ -8,6 +8,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winternl.h>
 #endif
 
 namespace {
@@ -48,6 +49,19 @@ std::string CleanSymbol(const char* raw, std::size_t len) {
 }
 
 #ifdef _WIN32
+constexpr NTSTATUS STATUS_NO_MORE_ENTRIES_VALUE = static_cast<NTSTATUS>(0x8000001AL);
+constexpr ACCESS_MASK DIRECTORY_QUERY_ACCESS = 0x0001;
+
+using NtOpenDirectoryObjectFn = NTSTATUS(NTAPI*)(
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
+using NtQueryDirectoryObjectFn = NTSTATUS(NTAPI*)(
+    HANDLE, PVOID, ULONG, BOOLEAN, BOOLEAN, PULONG, PULONG);
+
+struct ObjectDirectoryInformation {
+  UNICODE_STRING name;
+  UNICODE_STRING typeName;
+};
+
 std::wstring ToWide(const std::string& s) {
   if (s.empty()) return std::wstring();
   const int count = MultiByteToWideChar(
@@ -69,6 +83,107 @@ std::wstring ToWide(const std::string& s) {
       ws.data(),
       count);
   return ws;
+}
+
+std::string ToUtf8(const std::wstring& ws) {
+  if (ws.empty()) return std::string();
+  const int count = WideCharToMultiByte(
+      CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0, nullptr, nullptr);
+  if (count <= 0) return std::string();
+
+  std::string out(static_cast<std::size_t>(count), '\0');
+  WideCharToMultiByte(
+      CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), out.data(), count, nullptr, nullptr);
+  return out;
+}
+
+bool StartsWith(const std::wstring& value, const std::wstring& prefix) {
+  return value.size() >= prefix.size() &&
+      std::equal(prefix.begin(), prefix.end(), value.begin());
+}
+
+std::vector<std::string> ScanMapsByPrefix(const std::string& prefix, std::string* error) {
+  const std::wstring prefixWide = ToWide(prefix);
+  if (prefixWide.empty()) {
+    *error = "Memory prefix không hợp lệ.";
+    return {};
+  }
+
+  const std::wstring localMarker = L"Local\\";
+  const std::wstring globalMarker = L"Global\\";
+  std::wstring objectPrefix = prefixWide;
+  std::wstring publicMarker = localMarker;
+  std::wstring directoryPath;
+
+  if (StartsWith(prefixWide, globalMarker)) {
+    objectPrefix = prefixWide.substr(globalMarker.size());
+    publicMarker = globalMarker;
+    directoryPath = L"\\BaseNamedObjects";
+  } else {
+    if (StartsWith(prefixWide, localMarker)) {
+      objectPrefix = prefixWide.substr(localMarker.size());
+    }
+    DWORD sessionId = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &sessionId)) {
+      *error = "Không xác định được Windows session hiện tại.";
+      return {};
+    }
+    directoryPath = L"\\Sessions\\" + std::to_wstring(sessionId) + L"\\BaseNamedObjects";
+  }
+
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  auto openDirectory = reinterpret_cast<NtOpenDirectoryObjectFn>(
+      GetProcAddress(ntdll, "NtOpenDirectoryObject"));
+  auto queryDirectory = reinterpret_cast<NtQueryDirectoryObjectFn>(
+      GetProcAddress(ntdll, "NtQueryDirectoryObject"));
+  if (!openDirectory || !queryDirectory) {
+    *error = "Windows không cung cấp API liệt kê object namespace.";
+    return {};
+  }
+
+  UNICODE_STRING directoryName{};
+  directoryName.Buffer = directoryPath.data();
+  directoryName.Length = static_cast<USHORT>(directoryPath.size() * sizeof(wchar_t));
+  directoryName.MaximumLength = directoryName.Length;
+  OBJECT_ATTRIBUTES attributes{};
+  InitializeObjectAttributes(&attributes, &directoryName, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+
+  HANDLE directory = nullptr;
+  const NTSTATUS openStatus = openDirectory(&directory, DIRECTORY_QUERY_ACCESS, &attributes);
+  if (openStatus < 0 || !directory) {
+    *error = "Không mở được Windows object namespace: " + std::to_string(openStatus);
+    return {};
+  }
+
+  std::vector<std::string> results;
+  std::vector<std::uint8_t> buffer(64 * 1024);
+  ULONG context = 0;
+  while (true) {
+    ULONG returnedLength = 0;
+    const NTSTATUS status = queryDirectory(
+        directory, buffer.data(), static_cast<ULONG>(buffer.size()), TRUE, FALSE,
+        &context, &returnedLength);
+    if (status == STATUS_NO_MORE_ENTRIES_VALUE) break;
+    if (status < 0) {
+      *error = "Lỗi khi liệt kê shared memory: " + std::to_string(status);
+      results.clear();
+      break;
+    }
+
+    const auto* item = reinterpret_cast<const ObjectDirectoryInformation*>(buffer.data());
+    const std::wstring name(item->name.Buffer, item->name.Length / sizeof(wchar_t));
+    const std::wstring type(item->typeName.Buffer, item->typeName.Length / sizeof(wchar_t));
+    if (type != L"Section" || !StartsWith(name, objectPrefix)) continue;
+
+    const std::wstring publicName = publicMarker + name;
+    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, publicName.c_str());
+    if (!mapping) continue;
+    CloseHandle(mapping);
+    results.push_back(ToUtf8(publicName));
+  }
+
+  CloseHandle(directory);
+  return results;
 }
 
 Napi::Object BuildNotFoundRow(Napi::Env env, const std::string& mapName) {
@@ -232,8 +347,34 @@ Napi::Value ReadBatch(const Napi::CallbackInfo& info) {
   return out;
 }
 
+Napi::Value ScanByPrefix(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "scanByPrefix(prefix): prefix phải là string")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+#ifdef _WIN32
+  std::string error;
+  const auto names = ScanMapsByPrefix(info[0].As<Napi::String>().Utf8Value(), &error);
+  if (!error.empty()) {
+    Napi::Error::New(env, error).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  Napi::Array out = Napi::Array::New(env, names.size());
+  for (std::size_t i = 0; i < names.size(); ++i) out.Set(i, names[i]);
+  return out;
+#else
+  Napi::Error::New(env, "Scan shared memory chỉ hỗ trợ trên Windows.")
+      .ThrowAsJavaScriptException();
+  return env.Null();
+#endif
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("readBatch", Napi::Function::New(env, ReadBatch));
+  exports.Set("scanByPrefix", Napi::Function::New(env, ScanByPrefix));
   return exports;
 }
 

@@ -325,4 +325,35 @@ async function readShmQuotes(mapNames) {
   return readShmQuotesViaPowerShell(names);
 }
 
-module.exports = { checkShm, readShmQuote, readShmQuotes };
+async function scanShmByPrefix(prefix) {
+  const normalizedPrefix = String(prefix || "").trim();
+  if (!normalizedPrefix) {
+    return { ok: false, status: "EMPTY", message: "Vui lòng nhập Memory Prefix." };
+  }
+  if (/[\r\n\t\0]/.test(normalizedPrefix)) {
+    return { ok: false, status: "INVALID", message: "Memory Prefix chứa ký tự không hợp lệ." };
+  }
+  if (process.platform !== "win32") {
+    return { ok: false, status: "UNSUPPORTED", message: "Scan shared memory chỉ hỗ trợ trên Windows." };
+  }
+
+  const nativeReader = loadNativeReader();
+  if (!nativeReader?.scanByPrefix) {
+    return {
+      ok: false,
+      status: "ERROR",
+      message: "Native shm_reader chưa hỗ trợ scan. Vui lòng rebuild ứng dụng.",
+    };
+  }
+
+  try {
+    const names = nativeReader.scanByPrefix(normalizedPrefix);
+    const data = [...new Set((Array.isArray(names) ? names : []).map(String))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+    return { ok: true, status: data.length ? "FOUND" : "NOT_FOUND", data };
+  } catch (err) {
+    return { ok: false, status: "ERROR", message: err?.message || "Không thể scan shared memory." };
+  }
+}
+
+module.exports = { checkShm, readShmQuote, readShmQuotes, scanShmByPrefix };

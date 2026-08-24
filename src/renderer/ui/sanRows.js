@@ -63,7 +63,7 @@ export function createSanRows(sanListEl, options = {}) {
     }
   }
 
-  function addSanRow() {
+  function addSanRow(mapName = "", status = "-") {
     const row = document.createElement("div");
     row.className = "san-row";
 
@@ -79,6 +79,8 @@ export function createSanRows(sanListEl, options = {}) {
     const btnCheck = row.querySelector(".san-check-btn");
     const btnDelete = row.querySelector(".san-delete-btn");
     const badge = row.querySelector(".badge");
+    input.value = String(mapName || "");
+    setBadge(badge, status);
 
     btnCheck.onclick = async () => {
       setLoading(true, "Đang check map name...");
@@ -121,10 +123,21 @@ export function createSanRows(sanListEl, options = {}) {
     addSanRow();
   }
 
+  function replaceRows(mapNames) {
+    sanListEl.innerHTML = "";
+    const names = Array.isArray(mapNames) ? mapNames : [];
+    if (!names.length) {
+      addSanRow();
+      return;
+    }
+    names.forEach((mapName) => addSanRow(mapName, "FOUND"));
+  }
+
   return {
     addSanRow,
     getRows,
     validateRowsFound,
     resetRows,
+    replaceRows,
   };
 }

@@ -61,6 +61,19 @@
 
       <h4>Danh sách Sàn</h4>
 
+      <div class="san-scan-tools">
+        <div class="san-prefix-field">
+          <label for="memoryPrefix">Memory Prefix</label>
+          <input id="memoryPrefix" type="text" value="Local\MT5_" />
+        </div>
+        <button type="button" id="btnScanSan">Scan danh sách sàn</button>
+      </div>
+      <p class="san-scan-description">
+        Danh sách được lấy từ các MT5 đang hoạt động. Khi một MT5 dừng hoàn toàn,
+        shared-memory map tương ứng sẽ tự biến mất; nhấn Scan lại để cập nhật danh sách.
+      </p>
+      <div id="sanScanStatus" class="san-scan-status" role="status" aria-live="polite"></div>
+
       <div id="sanList"></div>
 
       <button type="button" id="btnAddSan">+ Thêm Sàn</button>

@@ -12,6 +12,9 @@ const btnAddSan = document.getElementById("btnAddSan");
 const formCreate = document.getElementById("formCreate");
 const listConfigsEl = document.getElementById("listConfigs");
 const sanListEl = document.getElementById("sanList");
+const memoryPrefixEl = document.getElementById("memoryPrefix");
+const btnScanSan = document.getElementById("btnScanSan");
+const sanScanStatusEl = document.getElementById("sanScanStatus");
 let platform = "unknown";
 const activeReadersByIdx = {};
 const globalPoller = {
@@ -658,7 +661,49 @@ btnClose.onclick = () => {
   modal.style.display = "none";
 };
 
-btnAddSan.onclick = sanRows.addSanRow;
+btnAddSan.onclick = () => sanRows.addSanRow();
+
+btnScanSan.onclick = async () => {
+  const prefix = memoryPrefixEl.value.trim();
+  sanScanStatusEl.className = "san-scan-status";
+
+  if (!prefix) {
+    sanScanStatusEl.textContent = "Vui lòng nhập Memory Prefix trước khi scan.";
+    sanScanStatusEl.classList.add("is-error");
+    memoryPrefixEl.focus();
+    return;
+  }
+
+  btnScanSan.disabled = true;
+  btnScanSan.textContent = "Đang scan...";
+  setLoading(true, "Đang scan shared memory...");
+  try {
+    const result = await window.shm.scan(prefix);
+    if (!result?.ok) {
+      sanScanStatusEl.textContent = result?.message || "Không thể scan shared memory.";
+      sanScanStatusEl.classList.add("is-error");
+      return;
+    }
+
+    const mapNames = Array.isArray(result.data) ? result.data : [];
+    sanRows.replaceRows(mapNames);
+    if (mapNames.length) {
+      sanScanStatusEl.textContent = `Đã tìm thấy ${mapNames.length} sàn, sắp xếp theo thứ tự tăng dần.`;
+      sanScanStatusEl.classList.add("is-success");
+    } else {
+      sanScanStatusEl.textContent = `Không tìm thấy shared memory phù hợp với prefix “${prefix}”. Bạn vẫn có thể thêm sàn thủ công.`;
+      sanScanStatusEl.classList.add("is-empty");
+    }
+  } catch (err) {
+    console.error(err);
+    sanScanStatusEl.textContent = err?.message || "Không thể scan shared memory. Danh sách hiện tại không bị thay đổi.";
+    sanScanStatusEl.classList.add("is-error");
+  } finally {
+    btnScanSan.disabled = false;
+    btnScanSan.textContent = "Scan danh sách sàn";
+    setLoading(false);
+  }
+};
 
 async function loadConfigs() {
   setLoading(true, "Đang tải danh sách...");

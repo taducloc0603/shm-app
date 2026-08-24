@@ -399,6 +399,56 @@
       color: #1e293b;
     }
 
+    .san-scan-tools {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 8px;
+    }
+
+    .san-prefix-field label {
+      display: block;
+      margin-bottom: 6px;
+      color: #334155;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    #btnScanSan {
+      background: #2563eb;
+      color: #fff;
+      padding: 10px 14px;
+      border-radius: 10px;
+      white-space: nowrap;
+    }
+
+    #btnScanSan:hover { background: #1d4ed8; }
+    #btnScanSan:disabled { cursor: wait; opacity: .65; }
+
+    .san-scan-description {
+      margin: 0 0 8px;
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .san-scan-status {
+      min-height: 18px;
+      margin-bottom: 10px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .san-scan-status.is-success { color: #15803d; }
+    .san-scan-status.is-error { color: #b91c1c; }
+    .san-scan-status.is-empty { color: #92400e; }
+
+    @media (max-width: 620px) {
+      .san-scan-tools { grid-template-columns: 1fr; }
+      #btnScanSan { width: 100%; }
+    }
+
     .san-row {
       display: grid;
       grid-template-columns: 1fr auto auto auto;
