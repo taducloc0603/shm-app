@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   build-release-win:
-    runs-on: windows-latest
+    # Pin VS 2022. windows-latest currently exposes VS 18, which node-gyp 11
+    # cannot identify and reports as version "undefined".
+    runs-on: windows-2022
+    env:
+      npm_config_msvs_version: 2022
 
     steps:
       - name: Checkout
@@ -22,8 +26,13 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install deps
-        run: npm install
+        run: npm ci
 
       - name: Rebuild native addon (shm_reader)
         run: npm run rebuild-native
