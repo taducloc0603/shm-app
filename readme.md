@@ -126,6 +126,45 @@ npm install
 npm run dev
 ```
 
+Chạy test (Node test runner có sẵn, không cần cài thêm):
+
+```bash
+npm test
+```
+
+## Log tick theo cặp sàn
+
+Mỗi lần bấm **Start** một config, app tạo **một file cho mỗi cặp sàn** trong `Desktop\ticks` (thư mục được tạo
+tự động). Config có N sàn thì có N·(N−1)/2 cặp. Bấm **End** (hoặc đóng app) sẽ ghi nốt hàng đợi và dòng kết thúc.
+
+- Tên file: `{yyyyMMdd_HHmmss}-{group}-{A}-{B}.log`, ví dụ `20260919_093000-XAU_Group-MT5_A-MT5_B.log`.
+  `A`/`B` là tên map đã bỏ `Local\`/`Global\`, theo đúng thứ tự trong config (A là sàn đứng trước).
+  Hai lần Start trong cùng một giây thì file sau có hậu tố `_2`.
+- Mỗi lần poll (30 ms) ghi một dòng cho mỗi cặp, kể cả khi giá không đổi; thiếu dữ liệu thì ghi `-`.
+  Định dạng giống kênh `-gap-tick.log` của TradeDesktop để dùng chung công cụ phân tích:
+
+  ```
+  [14:32:07.412] [GAP_TICK] gap_buy=12 gap_sell=-3 a_sym=XAUUSD a_bid=2412.35 a_ask=2412.55 a_spread=0.2 a_lat=8 b_sym=XAUUSD.m b_bid=2412.67 b_ask=2412.88 b_spread=0.21 b_lat=11 point=100
+  ```
+
+  Timestamp là giờ local của máy lúc poll. `gap_buy=(B.Bid−A.Ask)·point`, `gap_sell=(B.Ask−A.Bid)·point`
+  (làm tròn về số nguyên); `spread=ask−bid` (giá thô, đã khử sai số dấu phẩy động); `lat` là latency ms.
+- Đầu file có header (`GAP TICK START`, ngày, host, cặp, legend); cuối file có `GAP TICK STOP`.
+- Dòng tick chỉ có giờ; khi chạy qua 00:00 file có thêm dòng `[00:00:00.xxx] Date: yyyy-MM-dd` trước dòng đầu của ngày mới.
+- Mỗi lần Start, file tick (đúng mẫu tên `{yyyyMMdd_HHmmss}-....log`) cũ hơn **7 ngày** trong `Desktop\ticks` bị xóa.
+  File khác trong thư mục không bị đụng.
+- Dung lượng ước tính: khoảng 33 dòng/giây, ~20 MB/giờ **cho mỗi cặp**.
+- Khi file đủ **50 MB** thì tách sang file tiếp theo: `...-MT5_A-MT5_B.log` → `.001.log` → `.002.log`…
+  Tách đúng ranh giới dòng (không cắt ngang, không mất dòng).
+  - File trước kết thúc bằng `===== GAP TICK PART END -> tiep tuc o <file tiếp theo> =====`.
+  - File sau có **header đầy đủ** (START, ngày, host, cặp, legend) và thêm dòng
+    `Part: 001 (tiep theo cua <file đầu>, phien bat dau ...)`, nên mở riêng từng file vẫn biết là cặp nào, phiên nào.
+  - Chỉ file cuối cùng có `GAP TICK STOP`.
+- Ghi không chặn vòng poll: dòng vào hàng đợi (tối đa 50 000 dòng/cặp), ghi đĩa theo lô mỗi 200 ms. Hàng đợi đầy
+  thì bỏ dòng và đếm; số dòng bị bỏ được ghi cuối file và trong `[TICK_LOGGER][HEALTH]` (console, mỗi 60 s).
+- Code: `src/main/tickLogger.js` (ghi file), `src/renderer/utils/gapTickLine.js` (định dạng dòng),
+  gọi từ vòng poll trong `src/renderer/app.js`.
+
 ## Build ứng dụng
 
 ```bash

@@ -2,6 +2,7 @@ const { ipcMain } = require("electron");
 const { checkShm, readShmQuote, readShmQuotes, scanShmByPrefix } = require("./checkShm");
 const { startCsvSession, enqueueCsvRow, endCsvSession } = require("./csvLogger");
 const { listConfigs, createConfig } = require("./configCsvStore");
+const { getDefaultTickLogger } = require("./tickLogger");
 
 function registerIpcHandlers() {
   ipcMain.handle("app:platform", () => process.platform);
@@ -14,6 +15,10 @@ function registerIpcHandlers() {
   ipcMain.handle("csv:startSession", async (_event, startTimestamp) => startCsvSession(startTimestamp));
   ipcMain.handle("csv:enqueueRow", async (_event, sessionId, row) => enqueueCsvRow(sessionId, row));
   ipcMain.handle("csv:endSession", async (_event, sessionId) => endCsvSession(sessionId));
+  // Log tick theo cặp: start/end dùng invoke; log dùng send (một chiều, gọi mỗi lần poll 30 ms).
+  ipcMain.handle("ticks:start", async (_event, payload) => getDefaultTickLogger().startSession(payload));
+  ipcMain.on("ticks:log", (_event, sessionId, lines) => getDefaultTickLogger().logTicks(sessionId, lines));
+  ipcMain.handle("ticks:end", async (_event, sessionId) => getDefaultTickLogger().endSession(sessionId));
 }
 
 module.exports = { registerIpcHandlers };

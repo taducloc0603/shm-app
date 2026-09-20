@@ -4,6 +4,7 @@ import { createSanRows } from "./ui/sanRows.js";
 import { createConfigListView } from "./ui/configListView.js";
 import { getPlatform } from "./services/platformService.js";
 import { normalizeSans } from "./utils/normalizeSans.js";
+import { formatGapTickLine } from "./utils/gapTickLine.js";
 
 const modal = document.getElementById("modal");
 const btnOpen = document.getElementById("btnOpen");
@@ -213,6 +214,40 @@ function calcPairGaps(quoteByMap, exchangeA, exchangeB, pointValue) {
   }
 
   return { gapBuy, gapSell };
+}
+
+// Danh sách cặp sàn của một config, cùng thứ tự A/B và cùng cách bỏ trùng với vòng lặp gap trong poller.
+function listExchangePairs(exchanges) {
+  const pairs = [];
+  const seen = new Set();
+  for (let i = 0; i < exchanges.length; i += 1) {
+    for (let j = i + 1; j < exchanges.length; j += 1) {
+      const exchangeA = String(exchanges[i] || "").trim();
+      const exchangeB = String(exchanges[j] || "").trim();
+      if (!exchangeA || !exchangeB || exchangeA === exchangeB) continue;
+      const pairKey = stablePairKey(exchangeA, exchangeB);
+      if (seen.has(pairKey)) continue;
+      seen.add(pairKey);
+      pairs.push({ exchangeA, exchangeB });
+    }
+  }
+  return pairs;
+}
+
+function tickPairKey(exchangeA, exchangeB) {
+  return `${exchangeA}|${exchangeB}`;
+}
+
+// Một phía (A hoặc B) của dòng tick; map chưa có dữ liệu -> các trường ghi "-".
+function toTickSide(quote) {
+  if (quote?.status !== "FOUND") return {};
+  return {
+    sym: quote.symbol,
+    bid: quote.bid,
+    ask: quote.ask,
+    spread: quote.spread,
+    lat: quote.latencyMs,
+  };
 }
 
 function enqueueCsvLog(reader, row) {
@@ -528,6 +563,7 @@ function ensureGlobalPollerRunning() {
         const pointValue = Number(config?.point);
         const exchanges = Array.isArray(reader.mapNames) ? reader.mapNames : [];
         const processedPairKeys = new Set();
+        const tickLines = [];
 
         for (let i = 0; i < exchanges.length; i += 1) {
           for (let j = i + 1; j < exchanges.length; j += 1) {
@@ -540,12 +576,34 @@ function ensureGlobalPollerRunning() {
             processedPairKeys.add(pairKey);
 
             const gaps = calcPairGaps(quoteByMap, exchangeA, exchangeB, pointValue);
+
+            // Log tick: MỖI lần poll một dòng cho mỗi cặp, kể cả khi thiếu dữ liệu (ghi "-").
+            // Chỉ đọc dữ liệu đã tính, không ảnh hưởng signal.
+            if (reader.tickSessionId) {
+              tickLines.push({
+                pairKey: tickPairKey(exchangeA, exchangeB),
+                line: formatGapTickLine({
+                  timeMs: nowTs,
+                  gapBuy: gaps?.gapBuy,
+                  gapSell: gaps?.gapSell,
+                  a: toTickSide(quoteByMap[exchangeA]),
+                  b: toTickSide(quoteByMap[exchangeB]),
+                  point: pointValue,
+                }),
+              });
+            }
+
             if (!gaps) continue;
 
             const pairState = getOrCreatePairState(reader.signal.pairStates, pairKey);
             processBuySignal(reader, pairKey, pairState, gaps.gapBuy, isoTime, nowMs);
             processSellSignal(reader, pairKey, pairState, gaps.gapSell, isoTime, nowMs);
           }
+        }
+
+        // Một IPC cho tất cả cặp của config trong lần poll này.
+        if (reader.tickSessionId && tickLines.length) {
+          window.shm.tickLog(reader.tickSessionId, tickLines);
         }
       });
 
@@ -570,6 +628,12 @@ function stopQuoteReader(idx) {
   //     .endCsvSession(reader.signal.csvSessionId)
   //     .catch((err) => console.error("CSV endSession failed:", err));
   // }
+
+  if (reader?.tickSessionId) {
+    window.shm
+      .tickEnd(reader.tickSessionId)
+      .catch((err) => console.error("Đóng file tick lỗi:", err));
+  }
 
   delete activeReadersByIdx[idx];
 
@@ -628,7 +692,31 @@ async function startQuoteReader(idx) {
       pairStates: new Map(),
       csvSessionId: null,
     },
+    tickSessionId: null,
   };
+
+  // Log tick: mỗi cặp một file trong Desktop\ticks cho lần Start này.
+  const reader = activeReadersByIdx[idx];
+  try {
+    const tickPairs = listExchangePairs(mapNames).map(({ exchangeA, exchangeB }) => ({
+      mapA: exchangeA,
+      mapB: exchangeB,
+      point: Number(config.point),
+    }));
+    if (tickPairs.length) {
+      const tickRes = await window.shm.tickStart({ groupName: config.group_name, pairs: tickPairs });
+      if (tickRes?.ok && activeReadersByIdx[idx] === reader) {
+        reader.tickSessionId = tickRes.sessionId;
+      } else if (tickRes?.ok) {
+        // Reader đã bị End/Start lại trong lúc chờ tạo file -> đóng phiên này để không giữ file.
+        window.shm.tickEnd(tickRes.sessionId).catch((err) => console.error("Đóng file tick lỗi:", err));
+      } else {
+        console.error("Không tạo được file tick:", tickRes?.message || "Unknown error");
+      }
+    }
+  } catch (err) {
+    console.error("Không tạo được file tick:", err);
+  }
 
   // Tạm thời disable tạo CSV session theo yêu cầu: không ghi log data nữa.
   // try {

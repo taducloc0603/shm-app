@@ -10,5 +10,8 @@ contextBridge.exposeInMainWorld("shm", {
   startCsvSession: (startTimestamp) => ipcRenderer.invoke("csv:startSession", startTimestamp),
   enqueueCsvRow: (sessionId, row) => ipcRenderer.invoke("csv:enqueueRow", sessionId, row),
   endCsvSession: (sessionId) => ipcRenderer.invoke("csv:endSession", sessionId),
+  tickStart: (payload) => ipcRenderer.invoke("ticks:start", payload),
+  tickLog: (sessionId, lines) => ipcRenderer.send("ticks:log", sessionId, lines),
+  tickEnd: (sessionId) => ipcRenderer.invoke("ticks:end", sessionId),
   getPlatform: () => ipcRenderer.invoke("app:platform"),
 });
