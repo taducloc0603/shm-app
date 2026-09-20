@@ -4,3 +4,8 @@ dist-electron
 out
 .DS_Store
 .env
+
+# Du lieu mau .ticks/.trace cua TradeDesktop (16 MB + 2,2 MB) - khong commit nhi phan lon.
+# Dac ta giai ma duoc tu chung nam o docs/tradedesktop-binary-format.md.
+OneLegHidden.00/
+OneLegHidden.00.zip

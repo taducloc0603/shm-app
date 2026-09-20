@@ -52,9 +52,14 @@ src/
 tools/
   gapTickReader.mjs    # đọc .gtick theo luồng
   ticks.mjs            # CLI .gtick: info / export / slice / stats
+  madeoReader.mjs      # đọc .ticks/.trace của TradeDesktop
+  madeo.mjs            # CLI Madeo: info / export / log
 packaging/
   win/
     ticks.cmd          # chạy bộ giải mã bằng ShmHub.exe ở chế độ Node
+    madeo.cmd
+docs/
+  tradedesktop-binary-format.md   # đặc tả .ticks/.trace giải mã được
 ```
 
 ## Giải thích cấu trúc chi tiết
@@ -189,7 +194,8 @@ giống hệt nhau trong file.
 
   Không lưu vì suy ra được: `spread = ask − bid`, `gap_buy = (bidB − askA)·point`,
   `gap_sell = (askB − bidA)·point`. Giá lưu nguyên `f64` nên **chính xác hơn** text cũ (text làm tròn `toFixed(10)`).
-- **`ticksA`/`ticksB` — độ phủ dữ liệu.** Feed MT5 là event-driven, nên vòng poll 30 ms
+- **`ticksA`/`ticksB` — độ phủ dữ liệu.** Feed MT5 là event-driven (xem
+  [docs/tradedesktop-binary-format.md](docs/tradedesktop-binary-format.md)), nên vòng poll 30 ms
   **chắc chắn bỏ sót tick**. Hiệu `quote_seq` so với bản ghi trước cho biết đã có bao nhiêu tick:
   `0` = không có tick mới, `1` = bắt đúng một tick, `N` = có N tick nhưng chỉ thấy cái cuối.
   Trường 1 byte nên **255 nghĩa là "≥ 255"**, `stats` cảnh báo khi chạm trần. File v1 không có
@@ -236,6 +242,7 @@ chạy ở chế độ Node, nên **máy giao dịch không cần cài Node riê
 cd "C:\Program Files\ShmHub\resources\decoder"
 ticks.cmd stats "%USERPROFILE%\Desktop\ticks\<file>.gtick"
 ticks.cmd export "<file>.gtick" --csv --out "%USERPROFILE%\Desktop\tick.csv"
+madeo.cmd info  "<file.trace>"
 ```
 
 Nguồn của hai file `.cmd` ở `packaging/win/`; `extraResources` trong package.json chép chúng cùng
@@ -264,6 +271,23 @@ ngoài: bản thân giá vàng không nhạy cảm, nhưng cấu hình sàn và 
 
 Cần soi sâu một thời điểm đáng ngờ thì thêm một `slice` quanh thời điểm đó — vẫn nhỏ, vẫn đọc được.
 
+### Đọc file của TradeDesktop
+
+`OneLegHidden.00/` chứa file mẫu `.ticks`/`.trace` do TradeDesktop (Madeo) sinh ra. Định dạng đã
+được giải mã và ghi lại ở [docs/tradedesktop-binary-format.md](docs/tradedesktop-binary-format.md):
+
+```bash
+npm run madeo -- info   "OneLegHidden.00/20260609T020153.trace"
+npm run madeo -- export "<file.ticks|file.trace>" --csv [--out x.csv]
+npm run madeo -- log    "<file.trace>"
+```
+
+File Madeo không có magic hay version, nên `info` đi hết khung và báo rõ có dừng đúng byte cuối file
+không — đó là bằng chứng duy nhất cho thấy đã đọc đúng định dạng.
+
+Dùng để **đối chiếu chéo**: chạy song song hai hệ thống trên cùng một phiên rồi so `gap1/gap2` trong
+`.trace` của họ với `gap_buy`/`gap_sell` tính từ `.gtick` của mình.
+
 ### Code
 
 - `src/renderer/utils/gapTickRecord.js` — mã hóa/giải mã bản ghi 64 byte (chạy được cả ở renderer lẫn Node thuần).
@@ -272,6 +296,7 @@ Cần soi sâu một thời điểm đáng ngờ thì thêm một `slice` quanh 
 - `src/renderer/utils/gapTickLine.js` — định dạng dòng text (dùng cho `export --log` và chế độ `SHM_TICK_FORMAT=text`).
 - `src/renderer/utils/quoteSeq.js` — hiệu `quote_seq`, xử lý quay vòng uint32 (dùng cho cả TPS lẫn `ticksA/B`).
 - `tools/gapTickReader.mjs` + `tools/ticks.mjs` — bộ đọc và CLI cho `.gtick`.
+- `tools/madeoReader.mjs` + `tools/madeo.mjs` — bộ đọc và CLI cho `.ticks`/`.trace` của TradeDesktop.
 
 ## Build ứng dụng
 
