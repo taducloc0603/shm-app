@@ -6,7 +6,8 @@
     "dev": "electron .",
     "build": "electron-builder",
     "rebuild-native": "node-gyp rebuild --directory native/shm_reader",
-    "test": "node --test test/gapTickLine.test.mjs test/tickLogger.test.js"
+    "test": "node --test test/gapTickLine.test.mjs test/gapTickRecord.test.mjs test/gapTickStream.test.mjs test/quoteSeq.test.mjs test/tickLogger.test.js test/tickLoggerBinary.test.mjs",
+    "ticks": "node tools/ticks.mjs"
   },
   "dependencies": {
     "csv-parse": "^5.5.6",
@@ -31,6 +32,12 @@
       "preload.js",
       "native/shm_reader/build/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      { "from": "tools", "to": "decoder/tools" },
+      { "from": "packaging/win", "to": "decoder" },
+      { "from": "src/renderer/utils", "to": "decoder/src/renderer/utils" },
+      { "from": "src/main/gapTickFile.js", "to": "decoder/src/main/gapTickFile.js" }
     ],
     "win": { "target": "nsis" }
   }

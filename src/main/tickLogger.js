@@ -1,10 +1,17 @@
 // Log tick theo từng cặp sàn: mỗi cặp một file trong Desktop\ticks, mỗi lần Start một bộ file mới.
-// Port cách ghi của kênh GapTick trong TradeDesktop (TradeSessionFileLogger):
-// - Ghi không chặn luồng gọi: dòng vào hàng đợi của cặp, hàng đợi đầy thì BỎ dòng và đếm "dropped".
+//
+// Phần ghi file (chung cho mọi định dạng), port cách ghi của kênh GapTick trong TradeDesktop:
+// - Ghi không chặn luồng gọi: mục vào hàng đợi của cặp, hàng đợi đầy thì BỎ và đếm "dropped".
 // - Flush theo lô mỗi 200 ms (một lần write cho cả lô), tôn trọng backpressure của stream.
-// - Xoay file khi vượt 50 MB: {base}.001.log, {base}.002.log ...
+// - Xoay file khi vượt 50 MB: {base}.001.{ext}, {base}.002.{ext} ...
 // - Lỗi mở file của một cặp chỉ tắt cặp đó, không ảnh hưởng cặp khác.
 // - Health mỗi 60 s ra console.
+//
+// Định dạng nằm sau một adapter (xem createBinaryFormat / createTextFormat):
+// - "binary" (mặc định): .gtick, bản ghi cố định 64 byte — nhẹ hơn text ~3-4 lần và giữ nguyên
+//   độ chính xác f64 của giá. Xem src/main/gapTickFile.js và src/renderer/utils/gapTickRecord.js.
+// - "text": .log, đúng định dạng GAP_TICK cũ — giữ lại để soi tay tại hiện trường và làm
+//   bản đối chứng cho tools/ticks.mjs.
 //
 // Factory không phụ thuộc Electron để test chạy bằng Node thuần; instance mặc định (Desktop\ticks)
 // được tạo lười trong getDefaultTickLogger().
@@ -12,6 +19,13 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const {
+  FILE_EXT,
+  encodeFileHeader,
+  encodeControlRecord,
+  CONTROL_SESSION_END,
+  CONTROL_PART_END,
+} = require("./gapTickFile");
 
 const DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024;
 const DEFAULT_QUEUE_CAPACITY = 50_000;
@@ -19,8 +33,8 @@ const DEFAULT_FLUSH_INTERVAL_MS = 200;
 const DEFAULT_HEALTH_INTERVAL_MS = 60_000;
 const DEFAULT_END_TIMEOUT_MS = 5_000;
 const DEFAULT_RETENTION_DAYS = 7;
-// Chỉ file do logger này tạo: {yyyyMMdd_HHmmss}-....log (kể cả .001.log); file khác trong thư mục không bị đụng.
-const TICK_FILE_PATTERN = /^\d{8}_\d{6}-.+\.log$/;
+// Chỉ file do logger này tạo: {yyyyMMdd_HHmmss}-....{log|gtick} (kể cả .001.*); file khác không bị đụng.
+const TICK_FILE_PATTERN = /^\d{8}_\d{6}-.+\.(log|gtick)$/;
 
 const LEGEND =
   "[GAP_TICK][LEGEND] moi dong = mot lan poll shared memory | timestamp=gio local luc poll (HH:mm:ss.fff) | " +
@@ -62,9 +76,123 @@ function pairKeyOf(mapA, mapB) {
   return `${String(mapA || "").trim()}|${String(mapB || "").trim()}`;
 }
 
+// ---------------------------------------------------------------------------
+// Adapter định dạng. Mọi hàm trả về Buffer (hoặc null nếu mục không ghi được).
+// encode() chạy lúc flush, nên trạng thái riêng của định dạng nằm ở pair.fmtState.
+// ---------------------------------------------------------------------------
+
+function createTextFormat() {
+  return {
+    ext: ".log",
+    // Header text tự đọc được nên ghi ngay lúc mở file, kể cả khi phiên không có dòng nào.
+    deferHeader: false,
+
+    initState() {
+      return { lastHour: null };
+    },
+
+    header(pair, at) {
+      const t = formatClock(at);
+      const partLine =
+        pair.part > 0
+          ? `[${t}] Part: ${pad(pair.part, 3)} (tiep theo cua ${path.basename(`${pair.basePath}.log`)}, ` +
+            `phien bat dau ${formatDate(pair.startedAt)} ${formatClock(pair.startedAt).slice(0, 8)})\n`
+          : "";
+      return Buffer.from(
+        `[${t}] ===== GAP TICK START =====\n` +
+          `[${t}] Date: ${formatDate(at)}\n` +
+          `[${t}] Host: ${pair.hostName}\n` +
+          `[${t}] Pair: A=${pair.mapA} B=${pair.mapB} config=${pair.groupName} point=${Number.isFinite(pair.point) ? pair.point : "-"}\n` +
+          partLine +
+          `[${t}] ${LEGEND}\n`,
+        "utf8"
+      );
+    },
+
+    encode(pair, item, now) {
+      const line = String(item?.line ?? "");
+      // Dòng tick chỉ có giờ: khi giờ quay vòng qua 00:00 thì chèn dòng Date mới để biết dòng sau
+      // thuộc ngày nào. Yêu cầu lùi >= 12 giờ để chỉnh giờ hệ thống nhỏ (NTP) không bị hiểu nhầm.
+      const hourMatch = /^\[(\d{2}):/.exec(line);
+      const hour = hourMatch ? Number(hourMatch[1]) : null;
+      let text = `${line}\n`;
+      if (hour !== null && pair.fmtState.lastHour !== null && hour + 12 <= pair.fmtState.lastHour) {
+        text = `${line.slice(0, 14)} Date: ${formatDate(now())}\n${text}`;
+      }
+      if (hour !== null) pair.fmtState.lastHour = hour;
+      return Buffer.from(text, "utf8");
+    },
+
+    partEnd(pair, nextFileName, at) {
+      return Buffer.from(
+        `[${formatClock(at)}] ===== GAP TICK PART END -> tiep tuc o ${nextFileName} =====\n`,
+        "utf8"
+      );
+    },
+
+    sessionEnd(pair, at, dropped) {
+      const droppedLine =
+        dropped > 0 ? `[${formatClock(at)}] [GAP_TICK][WARN] dropped=${dropped} (hang doi day)\n` : "";
+      return Buffer.from(`${droppedLine}[${formatClock(at)}] ===== GAP TICK STOP =====\n`, "utf8");
+    },
+  };
+}
+
+function createBinaryFormat() {
+  return {
+    ext: FILE_EXT,
+    // Header chứa symbol của hai sàn, mà symbol chỉ biết được sau lần poll đầu -> ghi trễ.
+    deferHeader: true,
+
+    initState() {
+      return {};
+    },
+
+    header(pair, at) {
+      return encodeFileHeader({
+        mapA: pair.mapA,
+        mapB: pair.mapB,
+        symA: pair.symA ?? null,
+        symB: pair.symB ?? null,
+        group: pair.groupName,
+        point: Number.isFinite(pair.point) ? pair.point : null,
+        confirmGapPts: Number.isFinite(pair.confirmGapPts) ? pair.confirmGapPts : null,
+        openPts: Number.isFinite(pair.openPts) ? pair.openPts : null,
+        holdConfirmMs: Number.isFinite(pair.holdConfirmMs) ? pair.holdConfirmMs : null,
+        host: pair.hostName,
+        startedAtMs: pair.startedAt.getTime(),
+        openedAtMs: at.getTime(),
+        tzOffsetMin: -at.getTimezoneOffset(),
+        part: pair.part,
+        baseFile: `${path.basename(pair.basePath)}${FILE_EXT}`,
+      });
+    },
+
+    encode(_pair, item) {
+      const bytes = item?.bytes;
+      if (!bytes) return null;
+      // Qua IPC có thể là ArrayBuffer hoặc TypedArray; Buffer.from(view) lấy đúng vùng của view.
+      if (Buffer.isBuffer(bytes)) return bytes;
+      if (ArrayBuffer.isView(bytes)) return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      return Buffer.from(bytes);
+    },
+
+    partEnd(_pair, _nextFileName, at) {
+      return encodeControlRecord({ wallMs: at.getTime(), code: CONTROL_PART_END });
+    },
+
+    sessionEnd(_pair, at, dropped) {
+      return encodeControlRecord({ wallMs: at.getTime(), code: CONTROL_SESSION_END, dropped });
+    },
+  };
+}
+
+const FORMATS = { text: createTextFormat, binary: createBinaryFormat };
+
 function createTickLogger(options = {}) {
   const {
     resolveBaseDir,
+    format: formatName = "binary",
     maxFileBytes = DEFAULT_MAX_FILE_BYTES,
     queueCapacity = DEFAULT_QUEUE_CAPACITY,
     flushIntervalMs = DEFAULT_FLUSH_INTERVAL_MS,
@@ -78,6 +206,10 @@ function createTickLogger(options = {}) {
   if (typeof resolveBaseDir !== "function") {
     throw new Error("createTickLogger: thiếu resolveBaseDir.");
   }
+  if (!FORMATS[formatName]) {
+    throw new Error(`createTickLogger: format không hỗ trợ "${formatName}".`);
+  }
+  const format = FORMATS[formatName]();
 
   const sessions = new Map();
   let sessionSeq = 0;
@@ -108,7 +240,7 @@ function createTickLogger(options = {}) {
 
   function openPartFile(pair, filePath) {
     const fd = fs.openSync(filePath, "w"); // mở đồng bộ để lỗi lộ ra ngay, bắt riêng từng cặp
-    const stream = fs.createWriteStream(null, { fd, encoding: "utf8" });
+    const stream = fs.createWriteStream(null, { fd });
     stream.on("drain", () => {
       // Chỉ stream hiện tại mới được nhả cờ chờ; drain của file cũ (sau khi xoay) bỏ qua.
       if (pair.stream === stream) pair.waitingDrain = false;
@@ -121,44 +253,36 @@ function createTickLogger(options = {}) {
     pair.stream = stream;
     pair.filePath = filePath;
     pair.bytes = 0;
+    pair.headerWritten = false;
     pair.waitingDrain = false;
   }
 
-  function writeRaw(pair, text) {
-    if (!pair.stream || pair.disabled) return;
-    pair.bytes += Buffer.byteLength(text, "utf8");
-    if (!pair.stream.write(text)) pair.waitingDrain = true;
+  function writeRaw(pair, chunk) {
+    if (!pair.stream || pair.disabled || !chunk || chunk.length === 0) return;
+    pair.bytes += chunk.length;
+    if (!pair.stream.write(chunk)) pair.waitingDrain = true;
   }
 
   // Header đầy đủ cho mọi file của một cặp, để mỗi file tự đọc được độc lập.
-  // File đầu (part 0) không có dòng Part; file tách sau có thêm dòng Part trỏ về file đầu.
-  function buildHeader(pair, at) {
-    const t = formatClock(at);
-    const partLine =
-      pair.part > 0
-        ? `[${t}] Part: ${pad(pair.part, 3)} (tiep theo cua ${path.basename(`${pair.basePath}.log`)}, ` +
-          `phien bat dau ${formatDate(pair.startedAt)} ${formatClock(pair.startedAt).slice(0, 8)})\n`
-        : "";
-    return (
-      `[${t}] ===== GAP TICK START =====\n` +
-      `[${t}] Date: ${formatDate(at)}\n` +
-      `[${t}] Host: ${hostName}\n` +
-      `[${t}] Pair: A=${pair.mapA} B=${pair.mapB} config=${pair.groupName} point=${Number.isFinite(pair.point) ? pair.point : "-"}\n` +
-      partLine +
-      `[${t}] ${LEGEND}\n`
-    );
+  // Định dạng nhị phân hoãn tới lúc có bản ghi đầu tiên (cần symbol) nên đi qua hàm này.
+  function ensureHeader(pair, at) {
+    if (pair.headerWritten || pair.disabled || !pair.stream) return;
+    pair.headerWritten = true; // đặt trước khi ghi để writeRaw không gọi vòng lại
+    writeRaw(pair, format.header(pair, at));
   }
 
-  // Đủ ngưỡng thì tách sang file kế tiếp: {base}.001.log, {base}.002.log ...
+  // Đủ ngưỡng thì tách sang file kế tiếp: {base}.001.{ext}, {base}.002.{ext} ...
   function rotate(pair) {
-    pair.part += 1;
-    const oldStream = pair.stream;
-    const filePath = `${pair.basePath}.${pad(pair.part, 3)}.log`;
     const at = now();
+    const nextPart = pair.part + 1;
+    const filePath = `${pair.basePath}.${pad(nextPart, 3)}${format.ext}`;
+    const oldStream = pair.stream;
 
-    // Dòng cuối của file cũ cho biết phần tiếp theo nằm ở đâu.
-    writeRaw(pair, `[${formatClock(at)}] ===== GAP TICK PART END -> tiep tuc o ${path.basename(filePath)} =====\n`);
+    // Dấu cuối của file cũ cho biết phần tiếp theo nằm ở đâu.
+    ensureHeader(pair, at);
+    writeRaw(pair, format.partEnd(pair, path.basename(filePath), at));
 
+    pair.part = nextPart;
     try {
       openPartFile(pair, filePath);
     } catch (err) {
@@ -171,42 +295,36 @@ function createTickLogger(options = {}) {
     } catch (_err) {
       // noop
     }
-    writeRaw(pair, buildHeader(pair, at));
+    ensureHeader(pair, at);
   }
 
-  // Ghi toàn bộ dòng đang chờ của một cặp thành các lô, xoay file đúng ranh giới dòng.
+  // Ghi toàn bộ mục đang chờ của một cặp thành các lô, xoay file đúng ranh giới bản ghi.
   function flushPair(pair, { force = false } = {}) {
     if (pair.disabled || !pair.stream || !pair.queue.length) return;
     if (pair.waitingDrain && !force) return; // chờ stream nhả bộ đệm; hàng đợi vẫn giữ, có trần
 
-    const lines = pair.queue;
+    const items = pair.queue;
     pair.queue = [];
 
-    let batch = "";
+    const batch = [];
     let batchBytes = 0;
-    for (const line of lines) {
-      // Dòng tick chỉ có giờ: khi giờ quay vòng qua 00:00 thì chèn dòng Date mới để biết dòng sau thuộc ngày nào.
-      // Yêu cầu lùi >= 12 giờ để chỉnh giờ hệ thống nhỏ (NTP) không bị hiểu nhầm là qua ngày.
-      const hourMatch = /^\[(\d{2}):/.exec(line);
-      const hour = hourMatch ? Number(hourMatch[1]) : null;
-      let text = `${line}\n`;
-      if (hour !== null && pair.lastHour !== null && hour + 12 <= pair.lastHour) {
-        text = `${line.slice(0, 14)} Date: ${formatDate(now())}\n${text}`;
-      }
-      if (hour !== null) pair.lastHour = hour;
-      const bytes = Buffer.byteLength(text, "utf8");
-      if (pair.bytes + batchBytes + bytes > maxFileBytes && pair.bytes + batchBytes > 0) {
-        if (batch) writeRaw(pair, batch);
-        batch = "";
+    for (const item of items) {
+      const chunk = format.encode(pair, item, now);
+      if (!chunk || chunk.length === 0) continue;
+
+      ensureHeader(pair, now());
+      if (pair.bytes + batchBytes + chunk.length > maxFileBytes && pair.bytes + batchBytes > 0) {
+        if (batch.length) writeRaw(pair, Buffer.concat(batch, batchBytes));
+        batch.length = 0;
         batchBytes = 0;
         rotate(pair);
         if (pair.disabled) return;
       }
-      batch += text;
-      batchBytes += bytes;
+      batch.push(chunk);
+      batchBytes += chunk.length;
       pair.written += 1;
     }
-    if (batch) writeRaw(pair, batch);
+    if (batch.length) writeRaw(pair, Buffer.concat(batch, batchBytes));
   }
 
   function writeHealth() {
@@ -283,7 +401,7 @@ function createTickLogger(options = {}) {
       const label = `${sanitizeName(mapA)}-${sanitizeName(mapB)}`;
       let basePath = path.join(baseDir, `${stamp}-${group}-${label}`);
       // Hai lần Start trong cùng một giây: không ghi đè file cũ.
-      for (let n = 2; fs.existsSync(`${basePath}.log`); n += 1) {
+      for (let n = 2; fs.existsSync(`${basePath}${format.ext}`); n += 1) {
         basePath = path.join(baseDir, `${stamp}-${group}-${label}_${n}`);
       }
 
@@ -291,14 +409,21 @@ function createTickLogger(options = {}) {
         label,
         mapA,
         mapB,
+        symA: null,
+        symB: null,
+        hostName,
         groupName: String(payload.groupName || "").trim(),
         point: input?.point,
+        confirmGapPts: Number(input?.confirmGapPts),
+        openPts: Number(input?.openPts),
+        holdConfirmMs: Number(input?.holdConfirmMs),
         basePath,
         startedAt,
         part: 0,
         stream: null,
         filePath: null,
         bytes: 0,
+        headerWritten: false,
         queue: [],
         enqueued: 0,
         written: 0,
@@ -306,13 +431,13 @@ function createTickLogger(options = {}) {
         disabled: false,
         waitingDrain: false,
         lastError: null,
-        lastHour: null,
+        fmtState: format.initState(),
       };
 
       // try/catch RIÊNG từng cặp: một cặp lỗi không kéo theo cặp khác.
       try {
-        openPartFile(pair, `${basePath}.log`);
-        writeRaw(pair, buildHeader(pair, startedAt));
+        openPartFile(pair, `${basePath}${format.ext}`);
+        if (!format.deferHeader) ensureHeader(pair, startedAt);
         files.push(pair.filePath);
       } catch (err) {
         pair.disabled = true;
@@ -325,24 +450,30 @@ function createTickLogger(options = {}) {
 
     sessions.set(sessionId, session);
     ensureTimer();
-    return { ok: true, sessionId, files };
+    // format để renderer biết đóng gói bản ghi nhị phân hay dòng text.
+    return { ok: true, sessionId, format: formatName, files };
   }
 
   /**
    * @param {string} sessionId
-   * @param {Array<{ pairKey: string, line: string }>} lines  pairKey = "mapA|mapB" theo thứ tự trong config
+   * @param {Array<{ pairKey: string, line?: string, bytes?: ArrayBuffer|Uint8Array,
+   *                 symA?: string, symB?: string }>} items
+   *   pairKey = "mapA|mapB" theo thứ tự trong config.
    */
-  function logTicks(sessionId, lines) {
+  function logTicks(sessionId, items) {
     const session = sessions.get(sessionId);
-    if (!session || !Array.isArray(lines)) return;
-    for (const item of lines) {
+    if (!session || !Array.isArray(items)) return;
+    for (const item of items) {
       const pair = session.pairs.get(String(item?.pairKey || ""));
       if (!pair || pair.disabled) continue;
+      // Symbol chỉ biết sau lần poll đầu; giữ lại cho header (kể cả header của các part sau).
+      if (pair.symA == null && item?.symA) pair.symA = String(item.symA);
+      if (pair.symB == null && item?.symB) pair.symB = String(item.symB);
       if (pair.queue.length >= queueCapacity) {
         pair.dropped += 1; // đếm riêng, không throw, không chặn luồng gọi
         continue;
       }
-      pair.queue.push(String(item.line ?? ""));
+      pair.queue.push(item);
       pair.enqueued += 1;
     }
   }
@@ -359,10 +490,9 @@ function createTickLogger(options = {}) {
         return;
       }
       flushPair(pair, { force: true });
-      if (pair.dropped > 0) {
-        writeRaw(pair, `[${formatClock(now())}] [GAP_TICK][WARN] dropped=${pair.dropped} (hang doi day)\n`);
-      }
-      writeRaw(pair, `[${formatClock(now())}] ===== GAP TICK STOP =====\n`);
+      const at = now();
+      ensureHeader(pair, at);
+      writeRaw(pair, format.sessionEnd(pair, at, pair.dropped));
       pair.stream.end(() => resolve());
     });
   }
@@ -400,17 +530,19 @@ function createTickLogger(options = {}) {
     }));
   }
 
-  return { startSession, logTicks, endSession, endAllSessions, getStats, flushNow: onFlushTimer };
+  return { startSession, logTicks, endSession, endAllSessions, getStats, flushNow: onFlushTimer, format: formatName };
 }
 
 let defaultTickLogger = null;
 
 // Instance dùng trong app: Desktop\ticks. Require electron lười để file này test được bằng Node thuần.
+// SHM_TICK_FORMAT=text bật lại writer text cũ khi cần soi log bằng tay tại hiện trường.
 function getDefaultTickLogger() {
   if (!defaultTickLogger) {
     const { app } = require("electron");
     defaultTickLogger = createTickLogger({
       resolveBaseDir: () => path.join(app.getPath("desktop"), "ticks"),
+      format: process.env.SHM_TICK_FORMAT === "text" ? "text" : "binary",
     });
   }
   return defaultTickLogger;

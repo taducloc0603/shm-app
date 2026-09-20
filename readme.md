@@ -18,20 +18,23 @@
 ```text
 src/
   main/
-    index.js       # bootstrap main process
-    window.js      # tạo BrowserWindow
-    ipc.js         # đăng ký IPC handlers
-    checkShm.js    # nghiệp vụ check shm
+    index.js           # bootstrap main process
+    window.js          # tạo BrowserWindow
+    ipc.js             # đăng ký IPC handlers
+    checkShm.js        # nghiệp vụ check shm
+    configCsvStore.js  # lưu config ra Desktop\shm-config.csv
+    tickLogger.js      # ghi file tick theo cặp (hàng đợi, flush, xoay file, retention)
+    gapTickFile.js     # header file tick nhị phân .gtick
+    csvLogger.js       # (đang tắt) log CSV cũ
   preload/
-    index.js       # expose API an toàn sang renderer
+    index.js           # expose API an toàn sang renderer
   renderer/
-    index.html     # markup UI
-    styles.css     # giao diện
-    app.js         # entrypoint renderer (orchestrator)
+    index.html         # markup UI
+    styles.css         # giao diện
+    app.js             # entrypoint renderer (orchestrator)
     config/
       constants.js
     services/
-      supabaseService.js
       platformService.js
     state/
       appState.js
@@ -42,6 +45,16 @@ src/
     utils/
       escapeHtml.js
       normalizeSans.js
+      gapTickRecord.js # bản ghi tick 64 byte (encode/decode)
+      gapTickStream.js # lúc nào thì ghi: dedup theo quote_seq + heartbeat
+      gapTickLine.js   # định dạng dòng GAP_TICK text
+      quoteSeq.js      # hiệu quote_seq (có xử lý quay vòng uint32)
+tools/
+  gapTickReader.mjs    # đọc .gtick theo luồng
+  ticks.mjs            # CLI .gtick: info / export / slice / stats
+packaging/
+  win/
+    ticks.cmd          # chạy bộ giải mã bằng ShmHub.exe ở chế độ Node
 ```
 
 ## Giải thích cấu trúc chi tiết
@@ -135,35 +148,130 @@ npm test
 ## Log tick theo cặp sàn
 
 Mỗi lần bấm **Start** một config, app tạo **một file cho mỗi cặp sàn** trong `Desktop\ticks` (thư mục được tạo
-tự động). Config có N sàn thì có N·(N−1)/2 cặp. Bấm **End** (hoặc đóng app) sẽ ghi nốt hàng đợi và dòng kết thúc.
+tự động). Config có N sàn thì có N·(N−1)/2 cặp. Bấm **End** (hoặc đóng app) sẽ ghi nốt hàng đợi và dấu kết thúc.
 
-- Tên file: `{yyyyMMdd_HHmmss}-{group}-{A}-{B}.log`, ví dụ `20260919_093000-XAU_Group-MT5_A-MT5_B.log`.
-  `A`/`B` là tên map đã bỏ `Local\`/`Global\`, theo đúng thứ tự trong config (A là sàn đứng trước).
-  Hai lần Start trong cùng một giây thì file sau có hậu tố `_2`.
-- Mỗi lần poll (30 ms) ghi một dòng cho mỗi cặp, kể cả khi giá không đổi; thiếu dữ liệu thì ghi `-`.
-  Định dạng giống kênh `-gap-tick.log` của TradeDesktop để dùng chung công cụ phân tích:
+File ghi ở **định dạng nhị phân `.gtick`**: bản ghi cố định **64 byte**, little-endian. So với định dạng text cũ
+(`~185 byte/dòng`, ghi mỗi lần poll) thì nhẹ hơn **13,7 lần** mà **không mất thông tin nào** — đo trên một
+phiên mô phỏng 10 phút ở nhịp thật: **24,56 MB/giờ → 1,80 MB/giờ cho mỗi cặp**.
 
-  ```
-  [14:32:07.412] [GAP_TICK] gap_buy=12 gap_sell=-3 a_sym=XAUUSD a_bid=2412.35 a_ask=2412.55 a_spread=0.2 a_lat=8 b_sym=XAUUSD.m b_bid=2412.67 b_ask=2412.88 b_spread=0.21 b_lat=11 point=100
-  ```
+Hai thứ tạo ra mức giảm đó:
 
-  Timestamp là giờ local của máy lúc poll. `gap_buy=(B.Bid−A.Ask)·point`, `gap_sell=(B.Ask−A.Bid)·point`
-  (làm tròn về số nguyên); `spread=ask−bid` (giá thô, đã khử sai số dấu phẩy động); `lat` là latency ms.
-- Đầu file có header (`GAP TICK START`, ngày, host, cặp, legend); cuối file có `GAP TICK STOP`.
-- Dòng tick chỉ có giờ; khi chạy qua 00:00 file có thêm dòng `[00:00:00.xxx] Date: yyyy-MM-dd` trước dòng đầu của ngày mới.
-- Mỗi lần Start, file tick (đúng mẫu tên `{yyyyMMdd_HHmmss}-....log`) cũ hơn **7 ngày** trong `Desktop\ticks` bị xóa.
-  File khác trong thư mục không bị đụng.
-- Dung lượng ước tính: khoảng 33 dòng/giây, ~20 MB/giờ **cho mỗi cặp**.
-- Khi file đủ **50 MB** thì tách sang file tiếp theo: `...-MT5_A-MT5_B.log` → `.001.log` → `.002.log`…
-  Tách đúng ranh giới dòng (không cắt ngang, không mất dòng).
-  - File trước kết thúc bằng `===== GAP TICK PART END -> tiep tuc o <file tiếp theo> =====`.
-  - File sau có **header đầy đủ** (START, ngày, host, cặp, legend) và thêm dòng
-    `Part: 001 (tiep theo cua <file đầu>, phien bat dau ...)`, nên mở riêng từng file vẫn biết là cặp nào, phiên nào.
-  - Chỉ file cuối cùng có `GAP TICK STOP`.
-- Ghi không chặn vòng poll: dòng vào hàng đợi (tối đa 50 000 dòng/cặp), ghi đĩa theo lô mỗi 200 ms. Hàng đợi đầy
-  thì bỏ dòng và đếm; số dòng bị bỏ được ghi cuối file và trong `[TICK_LOGGER][HEALTH]` (console, mỗi 60 s).
-- Code: `src/main/tickLogger.js` (ghi file), `src/renderer/utils/gapTickLine.js` (định dạng dòng),
-  gọi từ vòng poll trong `src/renderer/app.js`.
+1. **Bỏ tên trường lặp lại.** Trong dòng text, ~70 byte mỗi dòng là tên trường (`gap_buy=`, `a_bid=`…), còn
+   `a_sym`/`b_sym`/`point` là hằng số cho cả file nhưng vẫn ghi lại mỗi 30 ms. Trong `.gtick` chúng nằm ở header.
+2. **Chỉ ghi khi có thay đổi.** Poller chạy 30 ms/lần nhưng feed MT5 chỉ đổi giá vài lần mỗi giây — đo trên file
+   mẫu `.ticks` của TradeDesktop, **84 % bản ghi có bid/ask y hệt bản ghi liền trước**. App chỉ ghi khi `quote_seq`
+   của A hoặc B đổi (so số nguyên, chính xác tuyệt đối), cộng một **heartbeat mỗi giây**.
+
+Heartbeat là phần bắt buộc, không phải tùy chọn: thiếu nó thì "giá đứng yên" và "app treo / feed chết" nhìn
+giống hệt nhau trong file.
+
+### Cấu trúc file
+
+- Tên file: `{yyyyMMdd_HHmmss}-{group}-{A}-{B}.gtick`, ví dụ `20260919_093000-XAU_Group-MT5_A-MT5_B.gtick`.
+  `A`/`B` là tên map đã bỏ `Local\`/`Global\`, theo đúng thứ tự trong config. Hai lần Start trong cùng một giây
+  thì file sau có hậu tố `_2`.
+- **Header tự mô tả** (đệm tới bội số 64 byte): magic `SHMTICK1`, version (hiện tại **2**, bộ đọc
+  vẫn mở được file v1 cũ), recordSize, rồi một khối JSON chứa
+  `mapA/mapB`, `symA/symB`, `group`, `point`, `confirmGapPts`, `openPts`, `holdConfirmMs`, `host`, `startedAtMs`,
+  `tzOffsetMin`, `part`, `baseFile`. Sai magic hoặc sai version thì bộ giải mã **từ chối đọc** thay vì diễn giải bừa.
+- **Bản ghi 64 byte**:
+
+  | offset | kiểu | trường |
+  |---|---|---|
+  | 0 | f64 | `wallMs` — `Date.now()` lúc poll (epoch ms, **đủ cả ngày**, không còn phải chèn dòng `Date:` lúc qua 00:00) |
+  | 8 / 16 | f64 | `timeMscA` / `timeMscB` — giờ tick thô của broker (**text cũ không ghi trường này**) |
+  | 24 / 32 | f64 | `bidA` / `askA` |
+  | 40 / 48 | f64 | `bidB` / `askB` |
+  | 56 / 58 | u16 | `latA` / `latB` (ms; `0xFFFF` = không có) |
+  | 60 | u8 | cờ: A hợp lệ, B hợp lệ, heartbeat, data gap, control |
+  | 61 / 62 | u8 | `ticksA` / `ticksB` — số tick của sàn đó đã xảy ra **kể từ bản ghi trước** |
+  | 63 | u8 | dự phòng |
+
+  Không lưu vì suy ra được: `spread = ask − bid`, `gap_buy = (bidB − askA)·point`,
+  `gap_sell = (askB − bidA)·point`. Giá lưu nguyên `f64` nên **chính xác hơn** text cũ (text làm tròn `toFixed(10)`).
+- **`ticksA`/`ticksB` — độ phủ dữ liệu.** Feed MT5 là event-driven, nên vòng poll 30 ms
+  **chắc chắn bỏ sót tick**. Hiệu `quote_seq` so với bản ghi trước cho biết đã có bao nhiêu tick:
+  `0` = không có tick mới, `1` = bắt đúng một tick, `N` = có N tick nhưng chỉ thấy cái cuối.
+  Trường 1 byte nên **255 nghĩa là "≥ 255"**, `stats` cảnh báo khi chạm trần. File v1 không có
+  trường này và bộ đọc trả `null` (= "không biết", khác hẳn `0`).
+- **Bản ghi điều khiển** (cùng 64 byte, cờ control) đánh dấu đóng file sạch kèm số bản ghi bị bỏ, và dấu hết part.
+  File không có dấu đóng = app crash hoặc đang ghi dở.
+- **Cố tình không dùng delta-encoding và không nén.** Nhỏ hơn nữa được (~16–20 byte/bản ghi) nhưng một byte hỏng
+  sẽ làm lệch khung toàn bộ phần đuôi file. Bản ghi cố định 64 byte thì file bị cắt cụt (crash, mất điện) chỉ mất
+  bản ghi cuối; `info` báo đúng số byte dư.
+- Khi file đủ **50 MB** thì tách sang `...-MT5_A-MT5_B.gtick` → `.001.gtick` → `.002.gtick`… Tách đúng biên 64 byte.
+  Mỗi part có **header đầy đủ riêng** (kể cả symbol) nên mở riêng từng file vẫn biết là cặp nào, phiên nào.
+- Mỗi lần Start, file tick (đúng mẫu tên `{yyyyMMdd_HHmmss}-....{gtick|log}`) cũ hơn **7 ngày** trong `Desktop\ticks`
+  bị xóa. File khác trong thư mục không bị đụng.
+- Ghi không chặn vòng poll: bản ghi vào hàng đợi (tối đa 50 000/cặp), ghi đĩa theo lô mỗi 200 ms. Hàng đợi đầy thì
+  bỏ và đếm; số bị bỏ nằm trong bản ghi điều khiển cuối file và trong `[TICK_LOGGER][HEALTH]` (console, mỗi 60 s).
+
+### Đọc file: `tools/ticks.mjs`
+
+Chạy bằng Node thuần, không cần Electron:
+
+```bash
+npm run ticks -- info   "C:\Users\<user>\Desktop\ticks\20260919_093000-XAU_Group-MT5_A-MT5_B.gtick"
+npm run ticks -- stats  <file.gtick> [--anonymize] [--confirm <pts>] [--open <pts>]
+npm run ticks -- export <file.gtick> --log            # dựng lại ĐÚNG định dạng GAP_TICK text cũ
+npm run ticks -- export <file.gtick> --csv --out x.csv
+npm run ticks -- slice  <file.gtick> --from 09:34:00 --to 09:34:06
+```
+
+Truyền file gốc thì các part `.001`/`.002`… được nạp theo, đúng thứ tự.
+
+`export --log` dựng lại dòng text **đúng từng ký tự** như writer cũ sẽ ghi — đã kiểm bằng cách so 4 896 dòng xuất
+từ `.gtick` với log text sinh song song từ cùng một chuỗi quote: khớp 100 %. Nhờ đó **tương thích với công cụ phân
+tích `-gap-tick.log` của TradeDesktop được giữ bằng chuyển đổi, không phải bằng lưu trữ**.
+
+Cần soi log bằng tay tại hiện trường thì chạy app với `SHM_TICK_FORMAT=text` để quay lại writer text cũ
+(`.log`, một dòng mỗi lần poll, không dedup).
+
+### Đọc file trên máy đã cài app (không có repo, không có Node)
+
+Bộ giải mã đi kèm bộ cài, nằm ở `resources\decoder\`. Hai file `.cmd` ở đó gọi chính `ShmHub.exe`
+chạy ở chế độ Node, nên **máy giao dịch không cần cài Node riêng**:
+
+```bat
+cd "C:\Program Files\ShmHub\resources\decoder"
+ticks.cmd stats "%USERPROFILE%\Desktop\ticks\<file>.gtick"
+ticks.cmd export "<file>.gtick" --csv --out "%USERPROFILE%\Desktop\tick.csv"
+```
+
+Nguồn của hai file `.cmd` ở `packaging/win/`; `extraResources` trong package.json chép chúng cùng
+`tools/` và vài file trong `src/` ra `resources\decoder\` dưới dạng file thường (không nằm trong
+`app.asar`), giữ nguyên bố cục thư mục mà các import cần.
+
+### Đưa dữ liệu cho AI phân tích
+
+Dùng `stats`, **không dán file thô**. Định dạng text không giúp gì cho AI: một giờ chạy vượt xa context window của
+mọi model, và đưa vài dòng đầu file rồi hỏi kết luận tổng thể là cách chắc chắn nhất để nhận về kết luận bịa.
+Đường đi đúng là: script đọc **hết** dữ liệu → báo cáo vài KB → AI đọc báo cáo đó.
+
+`stats` in ra (ví dụ thật: **1,9 KB** cho phiên 10 phút):
+
+- khoảng thời gian, số bản ghi, tần suất đổi giá, MB/giờ, tỉ lệ thiếu dữ liệu mỗi sàn, số bản ghi bị bỏ;
+- **độ phủ**: bắt được bao nhiêu trên tổng số tick thực tế (`bắt được 5257 / 7238 tick thực tế (72.6%)`);
+  sai số ±0,1 % vì bản ghi đầu tiên chưa có mốc so sánh và các tick sau bản ghi cuối không được đếm;
+- phân vị `gap_buy`/`gap_sell` (min/p50/p90/p99/max);
+- số lần và tổng thời lượng gap vượt `confirm_gap_pts` / `open_pts` (ngưỡng lấy từ header, không phải tra lại config);
+- phân vị latency mỗi sàn và độ lệch `time_msc` giữa hai sàn;
+- **danh sách các khoảng heartbeat bị thiếu** — bằng chứng app treo / feed chết;
+- bảng theo thời gian (tự gộp để không quá 60 dòng dù chạy cả ngày).
+
+`--anonymize` thay `host`, tên shared memory map và symbol bằng bí danh trước khi in. Dùng nó khi gửi báo cáo ra
+ngoài: bản thân giá vàng không nhạy cảm, nhưng cấu hình sàn và ngưỡng gap thì có.
+
+Cần soi sâu một thời điểm đáng ngờ thì thêm một `slice` quanh thời điểm đó — vẫn nhỏ, vẫn đọc được.
+
+### Code
+
+- `src/renderer/utils/gapTickRecord.js` — mã hóa/giải mã bản ghi 64 byte (chạy được cả ở renderer lẫn Node thuần).
+- `src/renderer/utils/gapTickStream.js` — quyết định lúc nào ghi (dedup theo `quote_seq` + heartbeat).
+- `src/main/gapTickFile.js` — header file; `src/main/tickLogger.js` — hàng đợi, flush, xoay file, retention.
+- `src/renderer/utils/gapTickLine.js` — định dạng dòng text (dùng cho `export --log` và chế độ `SHM_TICK_FORMAT=text`).
+- `src/renderer/utils/quoteSeq.js` — hiệu `quote_seq`, xử lý quay vòng uint32 (dùng cho cả TPS lẫn `ticksA/B`).
+- `tools/gapTickReader.mjs` + `tools/ticks.mjs` — bộ đọc và CLI cho `.gtick`.
 
 ## Build ứng dụng
 

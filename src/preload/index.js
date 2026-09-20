@@ -11,7 +11,7 @@ contextBridge.exposeInMainWorld("shm", {
   enqueueCsvRow: (sessionId, row) => ipcRenderer.invoke("csv:enqueueRow", sessionId, row),
   endCsvSession: (sessionId) => ipcRenderer.invoke("csv:endSession", sessionId),
   tickStart: (payload) => ipcRenderer.invoke("ticks:start", payload),
-  tickLog: (sessionId, lines) => ipcRenderer.send("ticks:log", sessionId, lines),
+  tickLog: (sessionId, items) => ipcRenderer.send("ticks:log", sessionId, items),
   tickEnd: (sessionId) => ipcRenderer.invoke("ticks:end", sessionId),
   getPlatform: () => ipcRenderer.invoke("app:platform"),
 });

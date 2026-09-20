@@ -13,6 +13,8 @@ const silentLogger = { info() {}, warn() {}, error() {} };
 function makeLogger(overrides = {}) {
   return createTickLogger({
     resolveBaseDir: () => baseDir,
+    format: "text", // nhóm test này canh đúng định dạng text cũ; .gtick có bộ test riêng
+
     hostName: "test-host",
     now: () => START,
     flushIntervalMs: 60_000, // test tự flush bằng flushNow/endSession

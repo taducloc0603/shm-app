@@ -17,7 +17,7 @@ function registerIpcHandlers() {
   ipcMain.handle("csv:endSession", async (_event, sessionId) => endCsvSession(sessionId));
   // Log tick theo cặp: start/end dùng invoke; log dùng send (một chiều, gọi mỗi lần poll 30 ms).
   ipcMain.handle("ticks:start", async (_event, payload) => getDefaultTickLogger().startSession(payload));
-  ipcMain.on("ticks:log", (_event, sessionId, lines) => getDefaultTickLogger().logTicks(sessionId, lines));
+  ipcMain.on("ticks:log", (_event, sessionId, items) => getDefaultTickLogger().logTicks(sessionId, items));
   ipcMain.handle("ticks:end", async (_event, sessionId) => getDefaultTickLogger().endSession(sessionId));
 }
 

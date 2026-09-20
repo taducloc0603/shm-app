@@ -5,6 +5,8 @@ import { createConfigListView } from "./ui/configListView.js";
 import { getPlatform } from "./services/platformService.js";
 import { normalizeSans } from "./utils/normalizeSans.js";
 import { formatGapTickLine } from "./utils/gapTickLine.js";
+import { createPairTickStream } from "./utils/gapTickStream.js";
+import { calcQuoteSeqDelta } from "./utils/quoteSeq.js";
 
 const modal = document.getElementById("modal");
 const btnOpen = document.getElementById("btnOpen");
@@ -37,8 +39,6 @@ const EPOCH_SECONDS_THRESHOLD = 1_000_000_000;
 const EPOCH_MS_THRESHOLD = 1_000_000_000_000;
 const EPOCH_US_THRESHOLD = 1_000_000_000_000_000;
 const EPOCH_NS_THRESHOLD = 1_000_000_000_000_000_000;
-const UINT32_MOD = 2 ** 32;
-
 function getDayMsFromNow(nowMs) {
   const d = new Date(nowMs);
   return (
@@ -63,13 +63,6 @@ function calcDayLatency(nowDayMs, tsDayMs) {
   let diff = nowDayMs - tsDayMs;
   if (diff < 0) diff += DAY_MS; // day rollover
   return Number.isFinite(diff) ? Math.max(0, diff) : null;
-}
-
-function calcQuoteSeqDelta(currSeq, prevSeq) {
-  if (!Number.isFinite(currSeq) || !Number.isFinite(prevSeq)) return null;
-  if (currSeq >= prevSeq) return currSeq - prevSeq;
-  // uint32 rollover
-  return (UINT32_MOD - prevSeq) + currSeq;
 }
 
 function calcLatencyFromTimeMsc(ts, nowMs, expectedMs = null) {
@@ -238,7 +231,8 @@ function tickPairKey(exchangeA, exchangeB) {
   return `${exchangeA}|${exchangeB}`;
 }
 
-// Một phía (A hoặc B) của dòng tick; map chưa có dữ liệu -> các trường ghi "-".
+// Một phía (A hoặc B) của DÒNG TEXT tick; map chưa có dữ liệu -> các trường ghi "-".
+// Chỉ dùng cho định dạng text (SHM_TICK_FORMAT=text); bản ghi nhị phân dùng toRecordSide.
 function toTickSide(quote) {
   if (quote?.status !== "FOUND") return {};
   return {
@@ -248,6 +242,34 @@ function toTickSide(quote) {
     spread: quote.spread,
     lat: quote.latencyMs,
   };
+}
+
+// Mục sẽ đẩy sang main cho một cặp ở lần poll này, hoặc null khi không cần ghi gì.
+// - binary (mặc định): chỉ ghi khi quote_seq đổi, cộng heartbeat 1 Hz -> nhỏ hơn ~13 lần.
+// - text: giữ nguyên hành vi cũ, mỗi lần poll một dòng, kể cả khi thiếu dữ liệu.
+function buildTickItem(reader, tickKey, quoteA, quoteB, { nowTs, gaps, pointValue }) {
+  if (reader.tickFormat === "text") {
+    return {
+      pairKey: tickKey,
+      line: formatGapTickLine({
+        timeMs: nowTs,
+        gapBuy: gaps?.gapBuy,
+        gapSell: gaps?.gapSell,
+        a: toTickSide(quoteA),
+        b: toTickSide(quoteB),
+        point: pointValue,
+      }),
+    };
+  }
+
+  let stream = reader.tickStreams.get(tickKey);
+  if (!stream) {
+    stream = createPairTickStream();
+    reader.tickStreams.set(tickKey, stream);
+  }
+
+  const emitted = stream.next(quoteA, quoteB, nowTs);
+  return emitted ? { pairKey: tickKey, ...emitted } : null;
 }
 
 function enqueueCsvLog(reader, row) {
@@ -563,7 +585,7 @@ function ensureGlobalPollerRunning() {
         const pointValue = Number(config?.point);
         const exchanges = Array.isArray(reader.mapNames) ? reader.mapNames : [];
         const processedPairKeys = new Set();
-        const tickLines = [];
+        const tickItems = [];
 
         for (let i = 0; i < exchanges.length; i += 1) {
           for (let j = i + 1; j < exchanges.length; j += 1) {
@@ -577,20 +599,15 @@ function ensureGlobalPollerRunning() {
 
             const gaps = calcPairGaps(quoteByMap, exchangeA, exchangeB, pointValue);
 
-            // Log tick: MỖI lần poll một dòng cho mỗi cặp, kể cả khi thiếu dữ liệu (ghi "-").
-            // Chỉ đọc dữ liệu đã tính, không ảnh hưởng signal.
+            // Log tick. Chỉ đọc dữ liệu đã tính, không ảnh hưởng signal.
             if (reader.tickSessionId) {
-              tickLines.push({
-                pairKey: tickPairKey(exchangeA, exchangeB),
-                line: formatGapTickLine({
-                  timeMs: nowTs,
-                  gapBuy: gaps?.gapBuy,
-                  gapSell: gaps?.gapSell,
-                  a: toTickSide(quoteByMap[exchangeA]),
-                  b: toTickSide(quoteByMap[exchangeB]),
-                  point: pointValue,
-                }),
+              const tickKey = tickPairKey(exchangeA, exchangeB);
+              const item = buildTickItem(reader, tickKey, quoteByMap[exchangeA], quoteByMap[exchangeB], {
+                nowTs,
+                gaps,
+                pointValue,
               });
+              if (item) tickItems.push(item);
             }
 
             if (!gaps) continue;
@@ -601,9 +618,9 @@ function ensureGlobalPollerRunning() {
           }
         }
 
-        // Một IPC cho tất cả cặp của config trong lần poll này.
-        if (reader.tickSessionId && tickLines.length) {
-          window.shm.tickLog(reader.tickSessionId, tickLines);
+        // Một IPC cho tất cả cặp của config trong lần poll này (bỏ qua khi không cặp nào đổi giá).
+        if (reader.tickSessionId && tickItems.length) {
+          window.shm.tickLog(reader.tickSessionId, tickItems);
         }
       });
 
@@ -693,6 +710,8 @@ async function startQuoteReader(idx) {
       csvSessionId: null,
     },
     tickSessionId: null,
+    tickFormat: null,
+    tickStreams: new Map(),
   };
 
   // Log tick: mỗi cặp một file trong Desktop\ticks cho lần Start này.
@@ -702,11 +721,16 @@ async function startQuoteReader(idx) {
       mapA: exchangeA,
       mapB: exchangeB,
       point: Number(config.point),
+      // Ngưỡng của config đi vào header file để phân tích sau này không phải tra lại config.
+      confirmGapPts: Number(config.confirm_gap_pts),
+      openPts: Number(config.open_pts),
+      holdConfirmMs: Number(config.hold_confirm_ms),
     }));
     if (tickPairs.length) {
       const tickRes = await window.shm.tickStart({ groupName: config.group_name, pairs: tickPairs });
       if (tickRes?.ok && activeReadersByIdx[idx] === reader) {
         reader.tickSessionId = tickRes.sessionId;
+        reader.tickFormat = tickRes.format || "binary";
       } else if (tickRes?.ok) {
         // Reader đã bị End/Start lại trong lúc chờ tạo file -> đóng phiên này để không giữ file.
         window.shm.tickEnd(tickRes.sessionId).catch((err) => console.error("Đóng file tick lỗi:", err));
