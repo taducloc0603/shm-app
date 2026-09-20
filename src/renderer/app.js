@@ -775,6 +775,24 @@ btnClose.onclick = () => {
 
 btnAddSan.onclick = () => sanRows.addSanRow();
 
+// Scan không ra gì mà im lặng là bẫy lớn nhất khi triển khai: prefix "Local\" chỉ thấy được
+// map do tiến trình trong CÙNG phiên Windows tạo ra (native addon quét
+// \Sessions\<session của chính app>\BaseNamedObjects), còn OpenFileMappingW thì trả về NOT_FOUND
+// chứ không phải lỗi. MT5 chạy ở phiên khác (service, scheduled task, phiên RDP khác) thì không
+// thấy gì mà cũng không biết vì sao.
+function emptyScanMessage(prefix) {
+  const base = `Không tìm thấy shared memory phù hợp với prefix “${prefix}”.`;
+  const tail = "Bạn vẫn có thể thêm sàn thủ công.";
+  if (/^global\\/i.test(prefix)) return `${base} ${tail}`;
+
+  return (
+    `${base} Lưu ý: prefix “Local\\” chỉ thấy được map do tiến trình trong CÙNG phiên Windows tạo ra — ` +
+    "nếu MT5 chạy ở phiên khác (service, scheduled task, phiên RDP khác) thì thử prefix " +
+    "“Global\\…” (EA phải tạo map tên Global\\… và MT5 phải chạy quyền admin). " +
+    tail
+  );
+}
+
 btnScanSan.onclick = async () => {
   const prefix = memoryPrefixEl.value.trim();
   sanScanStatusEl.className = "san-scan-status";
@@ -803,7 +821,7 @@ btnScanSan.onclick = async () => {
       sanScanStatusEl.textContent = `Đã tìm thấy ${mapNames.length} sàn, sắp xếp theo thứ tự tăng dần.`;
       sanScanStatusEl.classList.add("is-success");
     } else {
-      sanScanStatusEl.textContent = `Không tìm thấy shared memory phù hợp với prefix “${prefix}”. Bạn vẫn có thể thêm sàn thủ công.`;
+      sanScanStatusEl.textContent = emptyScanMessage(prefix);
       sanScanStatusEl.classList.add("is-empty");
     }
   } catch (err) {

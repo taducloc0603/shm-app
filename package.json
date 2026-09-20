@@ -6,7 +6,7 @@
     "dev": "electron .",
     "build": "electron-builder",
     "rebuild-native": "node-gyp rebuild --directory native/shm_reader",
-    "test": "node --test test/gapTickLine.test.mjs test/gapTickRecord.test.mjs test/gapTickStream.test.mjs test/quoteSeq.test.mjs test/tickLogger.test.js test/tickLoggerBinary.test.mjs",
+    "test": "node --test test/gapTickLine.test.mjs test/gapTickRecord.test.mjs test/gapTickStream.test.mjs test/quoteSeq.test.mjs test/tickLogger.test.js test/tickLoggerBinary.test.mjs test/window.test.js",
     "ticks": "node tools/ticks.mjs",
     "madeo": "node tools/madeo.mjs"
   },

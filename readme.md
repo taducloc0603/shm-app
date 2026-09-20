@@ -1,11 +1,13 @@
 # ShmHub Desktop UI
 
-Ứng dụng desktop (Electron) để tạo và quản lý danh sách cấu hình, lưu dữ liệu lên Supabase.
+Ứng dụng desktop (Electron) đọc báo giá MT5 từ Windows shared memory, tính gap giữa các cặp sàn
+và ghi log tick. **Chạy hoàn toàn offline** — không gọi mạng, không mở port; cấu hình và log nằm
+ở thư mục Desktop của người dùng.
 
 ## Chức năng hiện có
 
 - Tạo cấu hình mới qua modal (`group_name`, `point`, `open_pts`, `confirm_gap_pts`, `hold_confirm_ms`, `sans`)
-- Hiển thị danh sách cấu hình đã lưu từ Supabase
+- Hiển thị danh sách cấu hình đã lưu (file `Desktop\shm-config.csv`)
 - Mỗi record có nút **Show/Hide** để mở rộng phần thông tin chi tiết
 - Toggle trạng thái **Start / End** theo từng record (UI state)
 - Bảng ngang theo `sans` với 2 hàng `Bid/Ask` (placeholder `-`)
@@ -32,8 +34,6 @@ src/
     index.html         # markup UI
     styles.css         # giao diện
     app.js             # entrypoint renderer (orchestrator)
-    config/
-      constants.js
     services/
       platformService.js
     state/
@@ -88,11 +88,7 @@ Module chính:
 
 Các nhóm module:
 
-- `config/`
-  - `constants.js`: hằng số hệ thống (URL/key...)
-
 - `services/`
-  - `supabaseService.js`: đọc/ghi cấu hình từ Supabase (kèm fallback REST)
   - `platformService.js`: lấy platform từ preload API
 
 - `state/`
@@ -114,12 +110,12 @@ Các nhóm module:
 3. `app.js` khởi tạo services/state/ui modules.
 4. Gọi `loadConfigs()`:
    - show loading
-   - fetch từ Supabase
+   - đọc `Desktop\shm-config.csv` qua IPC `config:list`
    - render danh sách
    - hide loading
 5. Khi submit form tạo config:
    - validate dữ liệu sàn
-   - insert Supabase
+   - append một dòng vào `Desktop\shm-config.csv`
    - reload danh sách
 
 ## Nguyên tắc mở rộng đề xuất
@@ -304,12 +300,82 @@ Dùng để **đối chiếu chéo**: chạy song song hai hệ thống trên c�
 npm run build
 ```
 
-## Doưnload exe release
+## Tải bộ cài
 
-```bash
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Invoke-WebRequest -Uri "https://github.com/taducloc0603/split-files/releases/download/v1.0.1/GapLogger.App-1.0.1.exe" -OutFile GapLogger.exe
+Mỗi lần push lên nhánh `dev`, workflow `.github/workflows/release-windows-dev.yml` build và tạo một
+**pre-release** `dev-<số run>` kèm file cài NSIS:
+
+  https://github.com/taducloc0603/shm-app/releases
+
+Tải file `.exe` mới nhất ở đó rồi cài. Máy đích **không cần** Node, Python hay Visual Studio —
+native addon `.node` đã được build sẵn trong bộ cài. Có `gh` CLI thì nhanh hơn:
+
+```powershell
+gh release download --repo taducloc0603/shm-app --pattern "*.exe"
 ```
+
+## Triển khai lên VPS
+
+Những điều kiện dưới đây đều bắt buộc, và **phần lớn khi sai sẽ hỏng trong im lặng** chứ không
+báo lỗi — đọc kỹ trước khi mất thời gian dò.
+
+### 1. Phải có phiên Windows đồ hoạ
+
+Vòng poll shared memory 30 ms nằm ở **renderer** (`src/renderer/app.js`), không có chế độ headless.
+Cửa sổ không chạy thì không ghi được dòng tick nào.
+
+- **Không** chạy được dưới dạng Windows service (session 0 không có desktop).
+- Phải đăng nhập bằng một tài khoản thật (RDP hoặc console).
+
+### 2. MT5 và ShmHub phải cùng một phiên Windows
+
+Đây là chỗ mất thời gian nhất. Prefix mặc định `Local\MT5_` chỉ thấy được shared memory do tiến
+trình trong **cùng phiên** tạo ra — native addon quét
+`\Sessions\<session của chính ShmHub>\BaseNamedObjects`. Sai phiên thì `OpenFileMappingW` trả về
+`NOT_FOUND`, **app báo "không tìm thấy" chứ không báo lỗi**.
+
+| Cách bố trí | Việc phải làm |
+|---|---|
+| **Cùng phiên** (khuyên dùng) | Mở MT5 và ShmHub trong cùng một phiên RDP, cùng tài khoản. Giữ prefix `Local\MT5_`. Không cần quyền admin. |
+| **Khác phiên** (MT5 chạy service / scheduled task) | EA phải tạo map tên `Global\…` (cần quyền admin để có `SeCreateGlobalPrivilege`), rồi đổi prefix trong UI thành `Global\MT5_`. App hỗ trợ sẵn cả hai namespace. |
+
+Bấm **Scan danh sách sàn** mà không ra gì thì đọc thông báo — nó nhắc đúng chuyện phiên này.
+
+### 3. EA phía MT5 không nằm trong repo này
+
+App chỉ **đọc** shared memory (không có `CreateFileMapping` ở đâu cả). Phần ghi là một Expert
+Advisor riêng phải tự cài lên từng terminal MT5, ghi đúng layout ở `src/main/checkShm.js`:
+header 16 byte + ring 64 slot × 48 byte. Không có EA đó thì cài app cũng vô nghĩa.
+
+### 4. Tài khoản phải có thư mục Desktop ghi được
+
+App ghi thẳng vào Desktop, **không có fallback sang `userData`**:
+
+- `Desktop\shm-config.csv` — tạo ngay lúc mở app. Thiếu quyền ghi là chết ở màn hình đầu tiên.
+- `Desktop\ticks\` — log tick.
+
+Có thể chép sẵn `shm-config.csv` lên VPS để khỏi nhập lại cấu hình bằng tay.
+
+### 5. Ngắt phiên RDP
+
+App đã tắt `backgroundThrottling` và ba cơ chế backgrounding của Chromium (`src/main/window.js`,
+`src/main/index.js`) để vòng poll không bị hạ nhịp khi cửa sổ bị che hoặc phiên RDP bị ngắt.
+
+**Nên tự kiểm một lần trên VPS của mình**: chạy 10 phút lúc còn kết nối, End, xem **độ phủ** bằng
+`stats`; rồi chạy 10 phút nữa có ngắt RDP giữa chừng và so lại. Hai con số phải xấp xỉ nhau, và mục
+"Ngắt quãng (heartbeat bị thiếu)" phải trống.
+
+```bat
+cd "C:\Program Files\ShmHub\resources\decoder"
+ticks.cmd stats "%USERPROFILE%\Desktop\ticks\<file>.gtick"
+```
+
+### 6. Vận hành
+
+- Thoát app bằng nút đóng, **không `taskkill`** — app chờ tối đa 5 s để ghi nốt hàng đợi tick.
+- Đĩa: ~1,8 MB/giờ cho mỗi cặp sàn, file xoay ở 50 MB, tự xóa sau 7 ngày. Riêng `Desktop\shm-data\`
+  (CSV cũ, hiện đã tắt) **không có cơ chế tự xóa**.
+- Không cần mở port, không cần internet: app không gọi mạng.
 
 ## PowerShell đọc Shared Memory
 
